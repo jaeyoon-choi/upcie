@@ -147,7 +147,7 @@ vfio_device_get_iommu_group_id(const char *bdf, int *group_id)
  *       hostmem_dma_v2iova() path for VFIO-backed DMA.
  */
 static inline int
-vfio_map_heap(struct vfio_ctx *vfio, struct hostmem_heap *heap)
+vfio_map_hostmem_heap(struct vfio_ctx *vfio, struct hostmem_heap *heap)
 {
 	for (size_t i = 0; i < heap->nphys; ++i) {
 		struct vfio_iommu_type1_dma_map map = {0};
@@ -263,9 +263,9 @@ nvme_controller_open_vfio(struct nvme_controller *ctrlr, struct vfio_ctx *vfio, 
 	}
 	vfio->iommu_set = 1;
 
-	err = vfio_map_heap(vfio, heap);
+	err = vfio_map_hostmem_heap(vfio, heap);
 	if (err) {
-		UPCIE_DEBUG("FAILED: vfio_map_heap(); err(%d)", err);
+		UPCIE_DEBUG("FAILED: vfio_map_hostmem_heap(); err(%d)", err);
 		goto fail;
 	}
 

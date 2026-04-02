@@ -21,31 +21,6 @@ struct nvme {
 	enum nvme_backend backend;
 };
 
-static int
-device_get_driver_name(const char *bdf, char *driver_name, size_t driver_name_len)
-{
-	char path[PATH_MAX] = {0};
-	char link[PATH_MAX] = {0};
-	ssize_t nbytes;
-	char *base;
-
-	snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/driver", bdf);
-
-	nbytes = readlink(path, link, sizeof(link) - 1);
-	if (nbytes < 0) {
-		return -errno;
-	}
-
-	base = strrchr(link, '/');
-	if (!base || !base[1]) {
-		return -EINVAL;
-	}
-
-	snprintf(driver_name, driver_name_len, "%s", base + 1);
-
-	return 0;
-}
-
 static void
 nvme_cleanup(struct nvme *nvme)
 {
@@ -90,9 +65,9 @@ nvme_init(struct nvme *nvme, const char *bdf, struct rte *rte)
 	struct nvme_command cmd = {0};
 	int err;
 
-	err = device_get_driver_name(bdf, driver_name, sizeof(driver_name));
+	err = pci_device_get_driver_name(bdf, driver_name, sizeof(driver_name));
 	if (err) {
-		printf("FAILED: device_get_driver_name(); err(%d)\n", err);
+		printf("FAILED: pci_device_get_driver_name(); err(%d)\n", err);
 		return -err;
 	}
 

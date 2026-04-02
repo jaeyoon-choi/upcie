@@ -34,23 +34,31 @@ nvme_request_prep_command_prps_contig_cuda(struct nvme_request *request, struct 
                                            void *dbuf, size_t dbuf_nbytes, struct nvme_command *cmd)
 {
 	const uint64_t npages = (dbuf_nbytes + heap->config->pagesize - 1) >> heap->config->pagesize_shift;
+	uint8_t *base = dbuf;
 	const uint64_t pagesize = heap->config->pagesize;
 
 	/* Chaining is not supported, thus assert that the given dbuf fits. */
 	assert(npages <= 1 + 512);
 
-	cmd->prp1 = cudamem_heap_block_vtp(heap, dbuf);
+	cmd->prp1 = cudamem_heap_block_vtp(heap, base);
 
 	if (npages == 1) {
 		return;
 	} else if (npages == 2) {
-		cmd->prp2 = cmd->prp1 + pagesize;
+		/*
+		 * NVMe PRPs advance in host-page units, while cudamem address
+		 * translation is resolved from a CUDA heap backed by larger device
+		 * pages. After crossing a CUDA device-page boundary, `prp1 +
+		 * pagesize` is not guaranteed to equal the DMA-visible address of
+		 * the next host page, so resolve PRP2 from the virtual address.
+		 */
+		cmd->prp2 = cudamem_heap_block_vtp(heap, base + pagesize);
 	} else {
 		uint64_t *prp_list = request->prp;
 
 		cmd->prp2 = request->prp_addr;
 		for (uint64_t i = 1; i < npages; ++i) {
-			prp_list[i - 1] = cmd->prp1 + (i << heap->config->pagesize_shift);
+			prp_list[i - 1] = cudamem_heap_block_vtp(heap, base + (i * pagesize));
 		}
 	}
 }
