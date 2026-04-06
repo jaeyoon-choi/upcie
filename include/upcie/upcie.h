@@ -71,6 +71,7 @@ extern "C" {
 #include <upcie/barriers.h>
 #include <upcie/bitfield.h>
 #include <upcie/dmabuf.h>
+#include <upcie/dmabuf_importer.h>
 #include <upcie/hostmem.h>
 #include <upcie/hostmem_config.h>
 #include <upcie/hostmem_hugepage.h>

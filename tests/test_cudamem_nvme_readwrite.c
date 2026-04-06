@@ -3,6 +3,11 @@
 #define _UPCIE_WITH_NVME
 #include <upcie/upcie_cuda.h>
 
+enum nvme_backend {
+	NVME_BACKEND_SYSFS = 0,
+	NVME_BACKEND_VFIO,
+};
+
 struct rte {
 	struct hostmem_config config;
 	struct hostmem_heap heap;
@@ -14,7 +19,133 @@ struct rte {
 struct nvme {
 	struct nvme_controller ctrlr;
 	struct nvme_qpair ioq;
+	struct vfio_ctx vfio;
+	struct upcie_dmabuf_import cuda_import;
+	uint64_t *cuda_heap_phys_lut_orig;
+	uint64_t *cuda_heap_phys_lut_imported;
+	int importer_fd;
+	enum nvme_backend backend;
+	int cuda_heap_imported;
 };
+
+static int
+import_cuda_heap_for_nvme(struct nvme *nvme, const char *bdf, struct cudamem_heap *heap)
+{
+	int err;
+
+	if (!nvme || !bdf || !heap || !heap->phys_lut || heap->dmabuf.fd < 0) {
+		return -EINVAL;
+	}
+
+	nvme->importer_fd = upcie_dmabuf_importer_open();
+	if (nvme->importer_fd < 0) {
+		return nvme->importer_fd;
+	}
+
+	nvme->cuda_heap_phys_lut_imported = calloc(heap->nphys, sizeof(*nvme->cuda_heap_phys_lut_imported));
+	if (!nvme->cuda_heap_phys_lut_imported) {
+		err = -errno;
+		printf("FAILED: calloc(cuda_heap_phys_lut_imported); err(%d)\n", err);
+		goto error;
+	}
+
+	err = upcie_dmabuf_importer_map(nvme->importer_fd, bdf, heap->dmabuf.fd,
+					heap->config->device_pagesize, heap->nphys,
+					nvme->cuda_heap_phys_lut_imported, &nvme->cuda_import);
+	if (err) {
+		printf("FAILED: upcie_dmabuf_importer_map(); err(%d)\n", err);
+		goto error;
+	}
+
+	nvme->cuda_heap_phys_lut_orig = heap->phys_lut;
+	heap->phys_lut = nvme->cuda_heap_phys_lut_imported;
+	nvme->cuda_heap_imported = 1;
+
+	return 0;
+
+error:
+	free(nvme->cuda_heap_phys_lut_imported);
+	nvme->cuda_heap_phys_lut_imported = NULL;
+	if (nvme->importer_fd >= 0) {
+		upcie_dmabuf_importer_close(nvme->importer_fd);
+		nvme->importer_fd = -1;
+	}
+	return err;
+}
+
+static void
+unimport_cuda_heap_for_nvme(struct nvme *nvme, struct cudamem_heap *heap)
+{
+	if (!nvme || !heap) {
+		return;
+	}
+
+	if (nvme->cuda_heap_imported) {
+		heap->phys_lut = nvme->cuda_heap_phys_lut_orig;
+		nvme->cuda_heap_phys_lut_orig = NULL;
+		nvme->cuda_heap_imported = 0;
+	}
+
+	if (nvme->cuda_import.map_handle) {
+		int err = upcie_dmabuf_importer_unmap(&nvme->cuda_import);
+
+		if (err) {
+			printf("FAILED: upcie_dmabuf_importer_unmap(); err(%d)\n", err);
+		}
+		memset(&nvme->cuda_import, 0, sizeof(nvme->cuda_import));
+	}
+
+	free(nvme->cuda_heap_phys_lut_imported);
+	nvme->cuda_heap_phys_lut_imported = NULL;
+
+	if (nvme->importer_fd >= 0) {
+		int err = upcie_dmabuf_importer_close(nvme->importer_fd);
+
+		if (err) {
+			printf("FAILED: upcie_dmabuf_importer_close(); err(%d)\n", err);
+		}
+		nvme->importer_fd = -1;
+	}
+}
+
+static void
+nvme_cleanup(struct nvme *nvme, struct rte *rte)
+{
+	if (nvme->ioq.rpool) {
+		nvme_qpair_term(&nvme->ioq);
+		memset(&nvme->ioq, 0, sizeof(nvme->ioq));
+	}
+
+	if (nvme->backend == NVME_BACKEND_VFIO) {
+		unimport_cuda_heap_for_nvme(nvme, &rte->cuda_heap);
+
+		nvme_controller_close_vfio(&nvme->ctrlr, &nvme->vfio);
+		return;
+	}
+
+	nvme_controller_close(&nvme->ctrlr);
+}
+
+static int
+nvme_open_with_vfio_cudamem(struct nvme *nvme, const char *bdf, struct rte *rte)
+{
+	int err;
+
+	nvme->backend = NVME_BACKEND_VFIO;
+
+	err = nvme_controller_open_vfio(&nvme->ctrlr, &nvme->vfio, bdf, &rte->heap);
+	if (err) {
+		return err;
+	}
+
+	err = import_cuda_heap_for_nvme(nvme, bdf, &rte->cuda_heap);
+	if (err) {
+		nvme_cleanup(nvme, rte);
+		return err;
+	}
+
+	return 0;
+}
 
 int
 rte_init(struct rte *rte)
@@ -92,6 +223,7 @@ nvme_io(struct nvme *nvme, struct cudamem_heap *cuda_heap, uint8_t opc, void *bu
 
 	err = nvme_qpair_enqueue(&nvme->ioq, &cmd);
 	if (err) {
+		nvme_request_free(nvme->ioq.rpool, req->cid);
 		printf("FAILED: nvme_qpair_enqueue(); err(%d)\n", err);
 		return err;
 	}
@@ -119,11 +251,27 @@ nvme_io(struct nvme *nvme, struct cudamem_heap *cuda_heap, uint8_t opc, void *bu
 int
 nvme_init(struct nvme *nvme, const char *bdf, struct rte *rte)
 {
+	char driver_name[NAME_MAX + 1] = {0};
 	struct nvme_completion cpl = {0};
 	struct nvme_command cmd = {0};
 	int err;
 
-	err = nvme_controller_open(&nvme->ctrlr, bdf, &rte->heap);
+	err = pci_device_get_driver_name(bdf, driver_name, sizeof(driver_name));
+	if (err) {
+		printf("FAILED: pci_device_get_driver_name(); err(%d)\n", err);
+		return err;
+	}
+
+	if (!strcmp(driver_name, "vfio-pci")) {
+		err = nvme_open_with_vfio_cudamem(nvme, bdf, rte);
+	} else if (!strcmp(driver_name, "uio_pci_generic")) {
+		nvme->backend = NVME_BACKEND_SYSFS;
+		err = nvme_controller_open(&nvme->ctrlr, bdf, &rte->heap);
+	} else {
+		printf("FAILED: unsupported driver '%s'\n", driver_name);
+		return -ENOTSUP;
+	}
+
 	if (err) {
 		printf("FAILED: nvme_device_open(); err(%d)\n", err);
 		return err;
@@ -137,13 +285,14 @@ nvme_init(struct nvme *nvme, const char *bdf, struct rte *rte)
 						 nvme->ctrlr.timeout_ms, &cpl);
 	if (err) {
 		printf("FAILED: nvme_qpair_submit_sync(); err(%d)\n", err);
-		nvme_controller_close(&nvme->ctrlr);
+		nvme_cleanup(nvme, rte);
 		return err;
 	}
 
 	err = nvme_controller_create_io_qpair(&nvme->ctrlr, &nvme->ioq, 32);
 	if (err) {
 		printf("FAILED: nvme_device_create_io_qpair(); err(%d)\n", err);
+		nvme_cleanup(nvme, rte);
 		return err;
 	}
 
@@ -153,7 +302,9 @@ nvme_init(struct nvme *nvme, const char *bdf, struct rte *rte)
 int
 main(int argc, char **argv)
 {
-	struct nvme nvme = {0};
+	struct nvme nvme = {
+		.importer_fd = -1,
+	};
 	struct rte rte = {0};
 	const size_t buffer_size = 82 * sizeof(char);
 	void *write_buf = NULL, *read_buf = NULL;	///< CUDA IO buffers
@@ -174,7 +325,7 @@ main(int argc, char **argv)
 	err = nvme_init(&nvme, argv[1], &rte);
 	if (err) {
 		printf("FAILED: nvme_init(); err(%d)\n", err);
-		return err;
+		goto exit;
 	}
 
 	write_buf = cudamem_dma_malloc(&rte.cuda_heap, buffer_size);
@@ -258,7 +409,7 @@ exit:
 	cudamem_dma_free(&rte.cuda_heap, read_buf);
 	free(expected);
 	free(actual);
-	nvme_controller_close(&nvme.ctrlr);
+	nvme_cleanup(&nvme, &rte);
 	hostmem_heap_term(&rte.heap);
 	cudamem_heap_term(&rte.cuda_heap);
 	cuCtxDestroy(rte.cu_ctx);
