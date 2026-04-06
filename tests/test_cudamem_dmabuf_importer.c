@@ -74,6 +74,20 @@ main(int argc, char **argv)
 
 	printf("imported LUT:\n");
 	printf("  nphys: %u\n", mapping.nphys);
+	printf("  sg_nents: %u\n", mapping.sg_nents);
+	printf("  bus_nents: %u\n", mapping.bus_nents);
+	printf("  p2pdma_page_nents: %u\n", mapping.p2pdma_page_nents);
+	printf("  map_none_nents: %u\n", mapping.map_none_nents);
+	printf("  map_bus_addr_nents: %u\n", mapping.map_bus_addr_nents);
+	printf("  map_thru_host_bridge_nents: %u\n",
+	       mapping.map_thru_host_bridge_nents);
+	printf("  map_not_supported_nents: %u\n",
+	       mapping.map_not_supported_nents);
+	printf("  flags: 0x%x\n", mapping.flags);
+	printf("  any_bus_addr: %s\n",
+	       (mapping.flags & UPCIE_DMABUF_MAP_F_ANY_BUS_ADDR) ? "yes" : "no");
+	printf("  all_bus_addr: %s\n",
+	       (mapping.flags & UPCIE_DMABUF_MAP_F_ALL_BUS_ADDR) ? "yes" : "no");
 	for (uint32_t i = 0; i < mapping.nphys; ++i)
 		printf("  - 0x%" PRIx64 "\n", lut[i]);
 

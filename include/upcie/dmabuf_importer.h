@@ -11,7 +11,7 @@
  * an explicit UNMAP or closes the importer file descriptor.
  *
  * @file dmabuf_importer.h
- * @version 0.4.2
+ * @version 0.4.3
  */
 #ifndef UPCIE_DMABUF_IMPORTER_H
 #define UPCIE_DMABUF_IMPORTER_H
@@ -32,6 +32,9 @@
 #define UPCIE_DMABUF_IMPORTER_DEVICE "/dev/upcie-dmabuf-importer"
 #define UPCIE_DMABUF_BDF_LEN 16
 
+#define UPCIE_DMABUF_MAP_F_ANY_BUS_ADDR (1U << 0)
+#define UPCIE_DMABUF_MAP_F_ALL_BUS_ADDR (1U << 1)
+
 struct upcie_dmabuf_map_req {
 	char bdf[UPCIE_DMABUF_BDF_LEN];
 	__s32 dmabuf_fd;
@@ -39,6 +42,13 @@ struct upcie_dmabuf_map_req {
 	__u32 flags;
 	__aligned_u64 user_lut_ptr;
 	__u32 lut_capacity;
+	__u32 sg_nents;
+	__u32 bus_nents;
+	__u32 p2pdma_page_nents;
+	__u32 map_none_nents;
+	__u32 map_bus_addr_nents;
+	__u32 map_thru_host_bridge_nents;
+	__u32 map_not_supported_nents;
 	__u32 nphys;
 	__aligned_u64 map_handle;
 };
@@ -57,6 +67,14 @@ struct upcie_dmabuf_unmap_req {
 #ifndef __KERNEL__
 struct upcie_dmabuf_import {
 	int importer_fd;
+	__u32 flags;
+	__u32 sg_nents;
+	__u32 bus_nents;
+	__u32 p2pdma_page_nents;
+	__u32 map_none_nents;
+	__u32 map_bus_addr_nents;
+	__u32 map_thru_host_bridge_nents;
+	__u32 map_not_supported_nents;
 	__u32 nphys;
 	__u64 map_handle;
 };
@@ -98,6 +116,14 @@ upcie_dmabuf_importer_map(int importer_fd, const char *bdf, int dmabuf_fd,
 		return -errno;
 
 	mapping->importer_fd = importer_fd;
+	mapping->flags = req.flags;
+	mapping->sg_nents = req.sg_nents;
+	mapping->bus_nents = req.bus_nents;
+	mapping->p2pdma_page_nents = req.p2pdma_page_nents;
+	mapping->map_none_nents = req.map_none_nents;
+	mapping->map_bus_addr_nents = req.map_bus_addr_nents;
+	mapping->map_thru_host_bridge_nents = req.map_thru_host_bridge_nents;
+	mapping->map_not_supported_nents = req.map_not_supported_nents;
 	mapping->nphys = req.nphys;
 	mapping->map_handle = req.map_handle;
 	return 0;
