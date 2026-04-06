@@ -11,6 +11,16 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
+#include <linux/memremap.h>
+#include <linux/mmzone.h>
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+#include <linux/pci-p2pdma.h>
+#else
+#include <linux/dma-map-ops.h>
+#include <linux/pci-p2pdma.h>
+#endif
 
 #include "../include/upcie/dmabuf_importer.h"
 
@@ -29,6 +39,16 @@ struct upcie_dmabuf_ctx {
 	struct mutex lock;
 	struct list_head maps;
 	u64 next_handle;
+};
+
+/*
+ * Mirror of drivers/pci/p2pdma.c's internal pagemap wrapper so the debug
+ * helper can recover the provider device from a PCI_P2PDMA page.
+ */
+struct upcie_dmabuf_p2pdma_pagemap {
+	struct pci_dev *provider;
+	u64 bus_offset;
+	struct dev_pagemap pgmap;
 };
 
 static void
@@ -115,6 +135,120 @@ upcie_dmabuf_count_pages(struct sg_table *sgt, u32 page_size, u32 *nphys_out)
 
 	*nphys_out = (u32)nphys;
 	return 0;
+}
+
+static void
+upcie_dmabuf_accumulate_map_type(struct upcie_dmabuf_map_req *req,
+				 enum pci_p2pdma_map_type map_type)
+{
+	switch (map_type) {
+	case PCI_P2PDMA_MAP_BUS_ADDR:
+		req->map_bus_addr_nents++;
+		break;
+	case PCI_P2PDMA_MAP_THRU_HOST_BRIDGE:
+		req->map_thru_host_bridge_nents++;
+		break;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+	case PCI_P2PDMA_MAP_NONE:
+		req->map_none_nents++;
+		break;
+#endif
+	case PCI_P2PDMA_MAP_NOT_SUPPORTED:
+		req->map_not_supported_nents++;
+		break;
+	default:
+		req->map_none_nents++;
+		break;
+	}
+}
+
+static struct pci_dev *
+upcie_dmabuf_p2pdma_provider(struct page *page)
+{
+	struct dev_pagemap *pgmap;
+	struct upcie_dmabuf_p2pdma_pagemap *p2p_pgmap;
+
+	if (!page || !is_pci_p2pdma_page(page))
+		return NULL;
+
+	pgmap = page->pgmap;
+	if (!pgmap)
+		return NULL;
+
+	p2p_pgmap = container_of(pgmap, struct upcie_dmabuf_p2pdma_pagemap, pgmap);
+	return p2p_pgmap->provider;
+}
+
+static enum pci_p2pdma_map_type
+upcie_dmabuf_get_map_type(struct pci_p2pdma_map_state *state,
+			  struct device *dev, struct scatterlist *sg)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+	return pci_p2pdma_state(state, dev, sg_page(sg));
+#else
+	struct page *page = sg_page(sg);
+	struct pci_dev *provider;
+
+	if (!page || !is_pci_p2pdma_page(page))
+		return PCI_P2PDMA_MAP_NOT_SUPPORTED;
+
+	if (sg_dma_is_bus_address(sg))
+		return PCI_P2PDMA_MAP_BUS_ADDR;
+
+	provider = upcie_dmabuf_p2pdma_provider(page);
+	if (provider && pci_p2pdma_distance(provider, dev, false) >= 0)
+		return PCI_P2PDMA_MAP_THRU_HOST_BRIDGE;
+
+	return PCI_P2PDMA_MAP_NOT_SUPPORTED;
+#endif
+}
+
+static void
+upcie_dmabuf_describe_segments(struct pci_dev *pdev, struct sg_table *sgt,
+			       struct upcie_dmabuf_map_req *req)
+{
+	struct pci_p2pdma_map_state p2pdma_state = {0};
+	struct scatterlist *sg;
+	u32 bus_nents = 0;
+	u32 p2pdma_page_nents = 0;
+	int i;
+
+	if (!pdev || !sgt || !req)
+		return;
+
+	req->sg_nents = sgt->nents;
+	req->bus_nents = 0;
+	req->p2pdma_page_nents = 0;
+	req->map_none_nents = 0;
+	req->map_bus_addr_nents = 0;
+	req->map_thru_host_bridge_nents = 0;
+	req->map_not_supported_nents = 0;
+	req->flags = 0;
+
+	for_each_sg(sgt->sgl, sg, sgt->nents, i) {
+		struct page *page = sg_page(sg);
+
+		if (sg_dma_is_bus_address(sg))
+			bus_nents++;
+
+		if (page && is_pci_p2pdma_page(page))
+			p2pdma_page_nents++;
+
+		if (page && is_pci_p2pdma_page(page)) {
+			upcie_dmabuf_accumulate_map_type(req,
+							 upcie_dmabuf_get_map_type(&p2pdma_state,
+									   &pdev->dev, sg));
+		} else {
+			req->map_none_nents++;
+		}
+	}
+
+	req->bus_nents = bus_nents;
+	req->p2pdma_page_nents = p2pdma_page_nents;
+	if (bus_nents)
+		req->flags |= UPCIE_DMABUF_MAP_F_ANY_BUS_ADDR;
+	if (bus_nents == sgt->nents)
+		req->flags |= UPCIE_DMABUF_MAP_F_ALL_BUS_ADDR;
 }
 
 static int
@@ -212,6 +346,8 @@ upcie_dmabuf_ioctl_map(struct file *file, unsigned long arg)
 	err = upcie_dmabuf_count_pages(sgt, req.page_size, &req.nphys);
 	if (err)
 		goto out;
+
+	upcie_dmabuf_describe_segments(pdev, sgt, &req);
 
 	if (!req.user_lut_ptr || req.lut_capacity < req.nphys) {
 		err = copy_to_user((void __user *)arg, &req, sizeof(req)) ?
@@ -391,4 +527,14 @@ module_exit(upcie_dmabuf_exit);
 MODULE_AUTHOR("OpenAI Codex");
 MODULE_DESCRIPTION("uPCIe dma-buf importer helper for NVMe-target DMA LUTs");
 MODULE_LICENSE("GPL");
+
+/*
+ * MODULE_IMPORT_NS() stringifies its argument in some 6.8-based header trees
+ * but expects a string literal in newer upstream-style headers. Keep this
+ * helper buildable across both.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+MODULE_IMPORT_NS("DMA_BUF");
+#else
 MODULE_IMPORT_NS(DMA_BUF);
+#endif
