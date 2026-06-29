@@ -2,9 +2,11 @@
 
 #include <linux/dma-buf.h>
 #include <linux/fs.h>
+#include <linux/iommu.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/miscdevice.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pci.h>
@@ -24,14 +26,29 @@
 
 #include "../include/upcie/dmabuf_importer.h"
 
+enum upcie_dmabuf_map_kind {
+	UPCIE_DMABUF_KIND_LUT = 0,	/* attach + return per-page LUT */
+	UPCIE_DMABUF_KIND_IOMMU,	/* iommu_map phys into device domain */
+};
+
 struct upcie_dmabuf_map {
 	u64 handle;
+	enum upcie_dmabuf_map_kind kind;
 	u32 page_size;
 	u32 nphys;
 	struct pci_dev *pdev;
+
+	/* UPCIE_DMABUF_KIND_LUT */
 	struct dma_buf *dmabuf;
 	struct dma_buf_attachment *attach;
 	struct sg_table *sgt;
+
+	/* UPCIE_DMABUF_KIND_IOMMU */
+	struct iommu_domain *domain;
+	unsigned long iova_base;
+	size_t mapped_size;
+	struct dma_buf *held_dmabuf;	/* optional lifetime ref */
+
 	struct list_head node;
 };
 
@@ -56,6 +73,33 @@ upcie_dmabuf_map_destroy(struct upcie_dmabuf_map *map)
 {
 	if (!map)
 		return;
+
+	if (map->kind == UPCIE_DMABUF_KIND_IOMMU) {
+		if (map->domain && map->mapped_size) {
+			/*
+			 * Only unmap if the device still uses the same domain.
+			 * If userspace tore down VFIO first, that domain (and
+			 * its page tables) is already gone, so touching it would
+			 * be a use-after-free. Userspace is expected to UNMAP
+			 * before closing its VFIO container.
+			 */
+			struct iommu_domain *cur = map->pdev ?
+				iommu_get_domain_for_dev(&map->pdev->dev) : NULL;
+
+			if (cur == map->domain)
+				iommu_unmap(map->domain, map->iova_base,
+					    map->mapped_size);
+			else
+				pr_warn("upcie-dmabuf: domain changed before unmap, skipping iommu_unmap (handle=%llu)\n",
+					map->handle);
+		}
+		if (map->held_dmabuf)
+			dma_buf_put(map->held_dmabuf);
+		if (map->pdev)
+			pci_dev_put(map->pdev);
+		kfree(map);
+		return;
+	}
 
 	if (map->sgt)
 		dma_buf_unmap_attachment(map->attach, map->sgt,
@@ -447,6 +491,148 @@ upcie_dmabuf_ioctl_unmap(struct file *file, unsigned long arg)
 }
 
 static long
+upcie_dmabuf_ioctl_iommu_map(struct file *file, unsigned long arg)
+{
+	struct upcie_dmabuf_ctx *ctx = file->private_data;
+	struct upcie_dmabuf_iommu_map_req req;
+	struct upcie_dmabuf_map *map = NULL;
+	struct iommu_domain *domain = NULL;
+	struct pci_dev *pdev = NULL;
+	struct dma_buf *held = NULL;
+	u64 *phys = NULL;
+	size_t mapped = 0;
+	char bdf[UPCIE_DMABUF_BDF_LEN];
+	u64 handle;
+	int prot;
+	u32 i;
+	int err;
+
+	if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+		return -EFAULT;
+
+	if (!req.page_size || !is_power_of_2(req.page_size) ||
+	    req.page_size < PAGE_SIZE)
+		return -EINVAL;
+	if (!req.nphys || !req.user_phys_ptr)
+		return -EINVAL;
+	if (!IS_ALIGNED(req.iova_base, req.page_size))
+		return -EINVAL;
+	if (req.nphys > U32_MAX / req.page_size)
+		return -EOVERFLOW;
+
+	memcpy(bdf, req.bdf, sizeof(bdf));
+	bdf[sizeof(bdf) - 1] = '\0';
+
+	err = upcie_dmabuf_parse_bdf(bdf, &pdev);
+	if (err)
+		return err;
+
+	/*
+	 * The device must already be attached to an IOMMU domain. For a
+	 * VFIO-controlled NVMe this returns the VFIO/iommufd-owned domain, i.e.
+	 * the exact translation context the device uses for userspace I/O.
+	 */
+	domain = iommu_get_domain_for_dev(&pdev->dev);
+	if (!domain) {
+		err = -ENODEV;
+		goto err_unwind;
+	}
+
+	if (!req.prot) {
+		prot = IOMMU_READ | IOMMU_WRITE;
+	} else {
+		prot = 0;
+		if (req.prot & UPCIE_DMABUF_PROT_READ)
+			prot |= IOMMU_READ;
+		if (req.prot & UPCIE_DMABUF_PROT_WRITE)
+			prot |= IOMMU_WRITE;
+	}
+
+	phys = kvmalloc_array(req.nphys, sizeof(*phys), GFP_KERNEL);
+	if (!phys) {
+		err = -ENOMEM;
+		goto err_unwind;
+	}
+	if (copy_from_user(phys, (void __user *)(uintptr_t)req.user_phys_ptr,
+			   (size_t)req.nphys * sizeof(*phys))) {
+		err = -EFAULT;
+		goto err_unwind;
+	}
+
+	if (req.dmabuf_fd >= 0) {
+		held = dma_buf_get(req.dmabuf_fd);
+		if (IS_ERR(held)) {
+			err = PTR_ERR(held);
+			held = NULL;
+			goto err_unwind;
+		}
+	}
+
+	for (i = 0; i < req.nphys; i++) {
+		unsigned long iova = (unsigned long)req.iova_base +
+				     (size_t)i * req.page_size;
+
+		if (!IS_ALIGNED(phys[i], req.page_size)) {
+			err = -ERANGE;
+			goto err_unwind;
+		}
+
+		err = iommu_map(domain, iova, (phys_addr_t)phys[i],
+				req.page_size, prot, GFP_KERNEL);
+		if (err)
+			goto err_unwind;
+
+		mapped += req.page_size;
+	}
+
+	map = kzalloc(sizeof(*map), GFP_KERNEL);
+	if (!map) {
+		err = -ENOMEM;
+		goto err_unwind;
+	}
+
+	mutex_lock(&ctx->lock);
+	handle = ++ctx->next_handle;
+	if (!handle)
+		handle = ++ctx->next_handle;
+	map->handle = handle;
+	map->kind = UPCIE_DMABUF_KIND_IOMMU;
+	map->page_size = req.page_size;
+	map->nphys = req.nphys;
+	map->pdev = pdev;
+	map->domain = domain;
+	map->iova_base = (unsigned long)req.iova_base;
+	map->mapped_size = mapped;
+	map->held_dmabuf = held;
+	list_add_tail(&map->node, &ctx->maps);
+	mutex_unlock(&ctx->lock);
+
+	req.map_handle = handle;
+	if (copy_to_user((void __user *)arg, &req, sizeof(req))) {
+		mutex_lock(&ctx->lock);
+		list_del(&map->node);
+		mutex_unlock(&ctx->lock);
+		/* destroy owns pdev/held/mapping teardown from here */
+		upcie_dmabuf_map_destroy(map);
+		kvfree(phys);
+		return -EFAULT;
+	}
+
+	kvfree(phys);
+	return 0;
+
+err_unwind:
+	if (mapped)
+		iommu_unmap(domain, (unsigned long)req.iova_base, mapped);
+	if (held)
+		dma_buf_put(held);
+	if (pdev)
+		pci_dev_put(pdev);
+	kvfree(phys);
+	return err;
+}
+
+static long
 upcie_dmabuf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -454,6 +640,8 @@ upcie_dmabuf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return upcie_dmabuf_ioctl_map(file, arg);
 	case UPCIE_DMABUF_UNMAP:
 		return upcie_dmabuf_ioctl_unmap(file, arg);
+	case UPCIE_DMABUF_IOMMU_MAP:
+		return upcie_dmabuf_ioctl_iommu_map(file, arg);
 	default:
 		return -ENOTTY;
 	}

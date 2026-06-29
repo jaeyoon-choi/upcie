@@ -31,6 +31,7 @@ cutest_sources = files(
   'test_cudamem_iommufd.c',
   'test_cudamem_dmabuf_mmap_vfio.c',
   'test_cudamem_nvme_readwrite.c',
+  'test_cudamem_iommu_map_nvme_readwrite.c',
   'test_cudamem_mapping_nvme_readwrite.c',
 )
 
