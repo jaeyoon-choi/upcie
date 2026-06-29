@@ -156,6 +156,34 @@ pci_addr_to_text(struct pci_addr *addr, char *text)
 	return 0;
 }
 
+/**
+ * Resolve the bound kernel-driver name of the PCI device identified by `bdf`.
+ */
+static inline int
+pci_device_get_driver_name(const char *bdf, char *driver_name, size_t driver_name_len)
+{
+	char path[PATH_MAX] = {0};
+	char link[PATH_MAX] = {0};
+	ssize_t nbytes;
+	char *base;
+
+	snprintf(path, sizeof(path), "/sys/bus/pci/devices/%.*s/driver", PCI_BDF_LEN, bdf);
+
+	nbytes = readlink(path, link, sizeof(link) - 1);
+	if (nbytes < 0) {
+		return -errno;
+	}
+
+	base = strrchr(link, '/');
+	if (!base || !base[1]) {
+		return -EINVAL;
+	}
+
+	snprintf(driver_name, driver_name_len, "%s", base + 1);
+
+	return 0;
+}
+
 static inline int
 pci_func_open(const char *bdf, struct pci_func *func)
 {
