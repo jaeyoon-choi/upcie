@@ -22,8 +22,16 @@
 #define _UPCIE_WITH_NVME
 #include <upcie/upcie_cuda.h>
 
-/* High IOVA window reserved for GPU pages; keep clear of iova==phys host maps. */
-#define UPCIE_TEST_GPU_IOVA_BASE (1ULL << 40)
+/*
+ * IOVA window reserved for GPU pages. Constraints:
+ *  - above host RAM, since host-mem VFIO maps use iova == phys (see
+ *    nvme_controller_vfio.h); this box has 64 GiB RAM so stay above that.
+ *  - below the IOMMU domain address width: Intel VT-d returns -EFAULT when
+ *    iova+size exceeds it, and a 3-level (39-bit) domain caps IOVA at 512 GiB.
+ * 256 GiB satisfies both. Check the importer's "aperture=[..]" dmesg line and
+ * raise this if your platform exposes a wider aperture and needs more room.
+ */
+#define UPCIE_TEST_GPU_IOVA_BASE (256ULL << 30)
 
 struct rte {
 	struct hostmem_config config;
@@ -184,8 +192,7 @@ rte_init(struct rte *rte)
 }
 
 int
-nvme_io(struct nvme *nvme, struct cudamem_heap *cuda_heap, uint8_t opc, void *buffer,
-	size_t buffer_size)
+nvme_io(struct nvme *nvme, uint8_t opc, uint64_t iova)
 {
 	struct nvme_completion cpl = {0};
 	struct nvme_command cmd = {0};
@@ -203,9 +210,11 @@ nvme_io(struct nvme *nvme, struct cudamem_heap *cuda_heap, uint8_t opc, void *bu
 	cmd.nsid = 1;
 	cmd.opc = opc;
 	cmd.cdw10 = 0; ///< SLBA == 0
-	cmd.cdw12 = 0; ///< NLB == 0
+	cmd.cdw12 = 0; ///< NLB == 0 (1 block)
+	cmd.prp1 = iova;
+	cmd.prp2 = 0;
 
-	nvme_request_prep_command_prps_contig_cuda(req, cuda_heap, buffer, buffer_size, &cmd);
+	printf("DEBUG: opc=0x%x prp1=0x%" PRIx64 "\n", opc, (uint64_t)cmd.prp1);
 
 	err = nvme_qpair_enqueue(&nvme->ioq, &cmd);
 	if (err) {
@@ -274,6 +283,68 @@ nvme_init(struct nvme *nvme, const char *bdf, struct rte *rte)
 	return 0;
 }
 
+/* Dump the NVMe controller's Error Information Log (LID 0x01) for extra detail
+ * about the most recent failures beyond the bare completion status code. */
+static void
+dump_nvme_error_log(struct nvme *nvme)
+{
+	struct nvme_completion cpl = {0};
+	struct nvme_command cmd = {0};
+	const size_t nbytes = 256;          /* 4 entries x 64 bytes */
+	uint32_t numd = (nbytes / 4) - 1;   /* 0-based number of dwords */
+	uint8_t *buf = (uint8_t *)nvme->ctrlr.buf;
+	int err;
+
+	cmd.opc = 0x02;                     /* Get Log Page */
+	cmd.nsid = 0xFFFFFFFF;
+	cmd.cdw10 = 0x01 | (numd << 16);    /* LID=Error Info, NUMDL */
+
+	memset(buf, 0, nbytes);
+	err = nvme_qpair_submit_sync_contig_prps(&nvme->ctrlr.aq, nvme->ctrlr.heap,
+						 nvme->ctrlr.buf, nbytes, &cmd,
+						 nvme->ctrlr.timeout_ms, &cpl);
+	if (err) {
+		printf("    (Get Log Page failed; err=%d)\n", err);
+		return;
+	}
+
+	printf("    raw[0..31]:");
+	for (int i = 0; i < 32; i++)
+		printf(" %02x", buf[i]);
+	printf("\n");
+
+	for (int e = 0; e < 4; e++) {
+		uint8_t *p = buf + e * 64;
+		uint64_t ecount, lba, csi;
+		uint16_t sqid, cid, sf, pel, tts;
+		uint32_t nsid;
+		uint8_t vs, trtype;
+
+		memcpy(&ecount, p + 0, 8);
+		if (ecount == 0)
+			continue;
+		memcpy(&sqid, p + 8, 2);
+		memcpy(&cid, p + 10, 2);
+		memcpy(&sf, p + 12, 2);
+		memcpy(&pel, p + 14, 2);
+		memcpy(&lba, p + 16, 8);
+		memcpy(&nsid, p + 24, 4);
+		vs = p[28];
+		trtype = p[29];
+		memcpy(&csi, p + 32, 8);
+		memcpy(&tts, p + 40, 2);
+
+		printf("    [errlog #%d] count=%llu sqid=%u cid=%u status=0x%04x "
+		       "(SCT=0x%x SC=0x%x) param_err_loc=0x%04x\n",
+		       e, (unsigned long long)ecount, sqid, cid, sf,
+		       (sf & 0xE00) >> 8, (sf & 0x1FE) >> 1, pel);
+		printf("                 lba=%llu nsid=0x%x vs_avail=%u trtype=%u "
+		       "cmd_specific=0x%llx tts=0x%04x\n",
+		       (unsigned long long)lba, nsid, vs, trtype,
+		       (unsigned long long)csi, tts);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -331,51 +402,88 @@ main(int argc, char **argv)
 		goto exit;
 	}
 
-	for (size_t i = 0; i < buffer_size; i++) {
-		expected[i] = (i % 26) + 65;
-	}
+	/*
+	 * READ - WRITE - READ liveness proof:
+	 *   - stage pattern A on disk (host write), READ disk->GPU, verify GPU==A
+	 *   - change disk to pattern B (host write), READ disk->GPU, verify GPU==B
+	 * If READ#2 returns B (not A / not the sentinel), the GPU P2P read is
+	 * fetching LIVE disk content, not stale/coincidental data.
+	 */
+	{
+		void *hostbuf = hostmem_dma_malloc(&rte.heap, buffer_size);
+		uint64_t host_iova, gpu_iova;
+		size_t mism;
 
-	memset(actual, 0, buffer_size);
-
-	err = cuMemcpyHtoD((CUdeviceptr)write_buf, expected, buffer_size);
-	if (err) {
-		printf("FAILED: cuMemcpyHtoD(expected -> write_buf); err(%d)\n", err);
-		goto exit;
-	}
-
-	err = cuMemcpyHtoD((CUdeviceptr)read_buf, actual, buffer_size);
-	if (err) {
-		printf("FAILED: cuMemcpyHtoD(actual -> read_buf); err(%d)\n", err);
-		goto exit;
-	}
-
-	err = nvme_io(&nvme, &rte.cuda_heap, 0x1, write_buf, buffer_size);
-	if (err) {
-		printf("FAILED: nvme_io(write); err(%d)\n", err);
-		goto exit;
-	}
-
-	err = nvme_io(&nvme, &rte.cuda_heap, 0x2, read_buf, buffer_size);
-	if (err) {
-		printf("FAILED: nvme_io(read); err(%d)\n", err);
-		goto exit;
-	}
-
-	err = cuMemcpyDtoH(actual, (CUdeviceptr)read_buf, buffer_size);
-	if (err) {
-		printf("FAILED: cuMemcpyDtoH(read_buf -> actual); err(%d)\n", err);
-		goto exit;
-	}
-
-	for (size_t i = 0; i < buffer_size; i++) {
-		if (expected[i] != actual[i]) {
-			printf("FAILED: written data != read data\n");
-			printf("Wrote: %s\n", expected);
-			printf("Read: %s\n", actual);
+		if (!hostbuf) {
+			err = errno;
+			printf("FAILED: hostmem_dma_malloc(hostbuf); err(%d)\n", err);
 			goto exit;
 		}
+		host_iova = hostmem_dma_v2p(&rte.heap, hostbuf);        /* iova==phys */
+		gpu_iova = cudamem_heap_block_vtp(&rte.cuda_heap, read_buf);
+
+		/* WRITE A (host -> disk) */
+		for (size_t i = 0; i < buffer_size; i++)
+			expected[i] = (i % 26) + 'A';
+		memcpy(hostbuf, expected, buffer_size);
+		printf("\n[W1] host writes pattern A to disk\n");
+		err = nvme_io(&nvme, 0x1, host_iova);
+		if (err) { printf("FAILED: host write A\n"); hostmem_dma_free(&rte.heap, hostbuf); goto exit; }
+
+		/* READ #1 (disk -> GPU), expect A */
+		memset(actual, 0x5A, buffer_size);
+		cuMemcpyHtoD((CUdeviceptr)read_buf, actual, buffer_size);
+		printf("[R1] disk -> GPU (P2P write to GPU)\n");
+		err = nvme_io(&nvme, 0x2, gpu_iova);
+		if (err) { printf("FAILED: GPU read #1\n"); hostmem_dma_free(&rte.heap, hostbuf); goto exit; }
+		cuMemcpyDtoH(actual, (CUdeviceptr)read_buf, buffer_size);
+		mism = 0;
+		for (size_t i = 0; i < buffer_size; i++)
+			if (actual[i] != expected[i]) mism++;
+		printf("     READ#1 vs A: %zu/%zu mismatch => %s\n", mism, buffer_size, mism ? "FAIL" : "OK");
+
+		/* WRITE B (host -> disk), different pattern */
+		for (size_t i = 0; i < buffer_size; i++)
+			expected[i] = ((i * 7 + 3) % 26) + 'a';
+		memcpy(hostbuf, expected, buffer_size);
+		printf("\n[W2] host writes pattern B to disk\n");
+		err = nvme_io(&nvme, 0x1, host_iova);
+		if (err) { printf("FAILED: host write B\n"); hostmem_dma_free(&rte.heap, hostbuf); goto exit; }
+
+		/* READ #2 (disk -> GPU), expect B (proves liveness) */
+		memset(actual, 0xA5, buffer_size);
+		cuMemcpyHtoD((CUdeviceptr)read_buf, actual, buffer_size);
+		printf("[R2] disk -> GPU (P2P write to GPU)\n");
+		err = nvme_io(&nvme, 0x2, gpu_iova);
+		if (err) { printf("FAILED: GPU read #2\n"); hostmem_dma_free(&rte.heap, hostbuf); goto exit; }
+		cuMemcpyDtoH(actual, (CUdeviceptr)read_buf, buffer_size);
+		mism = 0;
+		for (size_t i = 0; i < buffer_size; i++)
+			if (actual[i] != expected[i]) mism++;
+		printf("     READ#2 vs B: %zu/%zu mismatch => %s\n", mism, buffer_size, mism ? "FAIL" : "OK");
+
+		hostmem_dma_free(&rte.heap, hostbuf);
+
+		printf(mism == 0
+		       ? "\n[RESULT] R-W-R verified: storage->GPU P2P read returns LIVE disk data under VFIO\n"
+		       : "\n[RESULT] READ#2 mismatch\n");
+		err = mism ? EIO : 0;
 	}
-	printf("SUCCES: written data == read data\n");
+
+	/* [4] Trigger the failing direction (GPU->disk = P2P read from GPU) and
+	 * dump the controller Error Information Log for extra detail. */
+	{
+		uint64_t gpu_iova;
+		int werr;
+
+		cuMemcpyHtoD((CUdeviceptr)write_buf, expected, buffer_size);
+		gpu_iova = cudamem_heap_block_vtp(&rte.cuda_heap, write_buf);
+		printf("\n[4] GPU->disk WRITE (P2P read from GPU) to trigger error\n");
+		werr = nvme_io(&nvme, 0x1, gpu_iova);
+		printf("    => GPU->disk WRITE %s\n", werr ? "FAILED" : "OK");
+		printf("    NVMe Error Information Log:\n");
+		dump_nvme_error_log(&nvme);
+	}
 
 exit:
 	cudamem_dma_free(&rte.cuda_heap, write_buf);
