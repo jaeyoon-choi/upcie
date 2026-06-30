@@ -507,8 +507,14 @@ upcie_dmabuf_ioctl_iommu_map(struct file *file, unsigned long arg)
 	u32 i;
 	int err;
 
-	if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+	if (copy_from_user(&req, (void __user *)arg, sizeof(req))) {
+		pr_err("upcie-dmabuf: iommu_map copy_from_user(req) failed\n");
 		return -EFAULT;
+	}
+
+	pr_info("upcie-dmabuf: iommu_map req bdf=%.*s page_size=%u nphys=%u iova_base=0x%llx phys_ptr=0x%llx dmabuf_fd=%d\n",
+		(int)sizeof(req.bdf), req.bdf, req.page_size, req.nphys,
+		req.iova_base, req.user_phys_ptr, req.dmabuf_fd);
 
 	if (!req.page_size || !is_power_of_2(req.page_size) ||
 	    req.page_size < PAGE_SIZE)
@@ -534,8 +540,28 @@ upcie_dmabuf_ioctl_iommu_map(struct file *file, unsigned long arg)
 	 */
 	domain = iommu_get_domain_for_dev(&pdev->dev);
 	if (!domain) {
+		pr_err("upcie-dmabuf: no IOMMU domain for %s (device not behind IOMMU / not VFIO-bound?)\n",
+		       bdf);
 		err = -ENODEV;
 		goto err_unwind;
+	}
+	pr_info("upcie-dmabuf: domain=%p type=%u aperture=[0x%llx..0x%llx] pgsize_bitmap=0x%lx for %s\n",
+		domain, domain->type, domain->geometry.aperture_start,
+		domain->geometry.aperture_end, domain->pgsize_bitmap, bdf);
+
+	/* Intel VT-d returns -EFAULT when iova+size exceeds the domain address
+	 * width; pre-check against the aperture so misuse is obvious. */
+	{
+		u64 last = (u64)req.iova_base +
+			   (u64)req.nphys * req.page_size - 1;
+
+		if (domain->geometry.aperture_end &&
+		    last > domain->geometry.aperture_end) {
+			pr_err("upcie-dmabuf: iova range [0x%llx..0x%llx] exceeds domain aperture_end=0x%llx\n",
+			       req.iova_base, last, domain->geometry.aperture_end);
+			err = -ERANGE;
+			goto err_unwind;
+		}
 	}
 
 	if (!req.prot) {
@@ -547,6 +573,9 @@ upcie_dmabuf_ioctl_iommu_map(struct file *file, unsigned long arg)
 		if (req.prot & UPCIE_DMABUF_PROT_WRITE)
 			prot |= IOMMU_WRITE;
 	}
+	/* This path always maps peer device MMIO (GPU BAR), so request the MMIO
+	 * memory type to get device (uncached) attributes in the page tables. */
+	prot |= IOMMU_MMIO;
 
 	phys = kvmalloc_array(req.nphys, sizeof(*phys), GFP_KERNEL);
 	if (!phys) {
@@ -555,6 +584,8 @@ upcie_dmabuf_ioctl_iommu_map(struct file *file, unsigned long arg)
 	}
 	if (copy_from_user(phys, (void __user *)(uintptr_t)req.user_phys_ptr,
 			   (size_t)req.nphys * sizeof(*phys))) {
+		pr_err("upcie-dmabuf: iommu_map copy_from_user(phys[%u]) from 0x%llx failed\n",
+		       req.nphys, req.user_phys_ptr);
 		err = -EFAULT;
 		goto err_unwind;
 	}
@@ -563,6 +594,8 @@ upcie_dmabuf_ioctl_iommu_map(struct file *file, unsigned long arg)
 		held = dma_buf_get(req.dmabuf_fd);
 		if (IS_ERR(held)) {
 			err = PTR_ERR(held);
+			pr_err("upcie-dmabuf: dma_buf_get(fd=%d) failed err=%d\n",
+			       req.dmabuf_fd, err);
 			held = NULL;
 			goto err_unwind;
 		}
@@ -579,10 +612,33 @@ upcie_dmabuf_ioctl_iommu_map(struct file *file, unsigned long arg)
 
 		err = iommu_map(domain, iova, (phys_addr_t)phys[i],
 				req.page_size, prot, GFP_KERNEL);
-		if (err)
+		if (err) {
+			pr_err("upcie-dmabuf: iommu_map(iova=0x%lx phys=0x%llx size=%u prot=%d) failed err=%d at idx=%u\n",
+			       iova, phys[i], req.page_size, prot, err, i);
 			goto err_unwind;
+		}
 
 		mapped += req.page_size;
+	}
+	pr_info("upcie-dmabuf: iommu_map ok: %u pages, iova 0x%llx..0x%llx -> gpu\n",
+		req.nphys, req.iova_base,
+		req.iova_base + (u64)req.nphys * req.page_size);
+
+	/* Read the page table back through the IOMMU API to prove the mapping is
+	 * actually installed and translates to the expected GPU physical. */
+	{
+		u64 last_iova = req.iova_base +
+				(u64)(req.nphys - 1) * req.page_size;
+		phys_addr_t p0 = iommu_iova_to_phys(domain,
+						    (unsigned long)req.iova_base);
+		phys_addr_t pn = iommu_iova_to_phys(domain,
+						    (unsigned long)last_iova);
+
+		pr_info("upcie-dmabuf: verify iova_to_phys: 0x%llx->0x%llx (exp 0x%llx), 0x%llx->0x%llx (exp 0x%llx)\n",
+			req.iova_base, (u64)p0, phys[0],
+			last_iova, (u64)pn, phys[req.nphys - 1]);
+		if (p0 != (phys_addr_t)phys[0])
+			pr_warn("upcie-dmabuf: MAPPING MISMATCH at base — page table not as expected!\n");
 	}
 
 	map = kzalloc(sizeof(*map), GFP_KERNEL);
@@ -609,6 +665,7 @@ upcie_dmabuf_ioctl_iommu_map(struct file *file, unsigned long arg)
 
 	req.map_handle = handle;
 	if (copy_to_user((void __user *)arg, &req, sizeof(req))) {
+		pr_err("upcie-dmabuf: iommu_map copy_to_user(req) failed\n");
 		mutex_lock(&ctx->lock);
 		list_del(&map->node);
 		mutex_unlock(&ctx->lock);
