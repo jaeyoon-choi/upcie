@@ -234,6 +234,7 @@ nvme_controller_open_vfio(struct nvme_controller *ctrlr, struct vfio_ctx *vfio, 
 		UPCIE_DEBUG("FAILED: vfio_device_get_iommu_group_id(); err(%d)", err);
 		goto fail;
 	}
+	UPCIE_DEBUG("vfio: bdf=%s iommu_group=%d", bdf, group_id);
 
 	err = vfio_container_open(&vfio->container);
 	if (err) {
@@ -292,12 +293,15 @@ nvme_controller_open_vfio(struct nvme_controller *ctrlr, struct vfio_ctx *vfio, 
 		goto fail;
 	}
 	vfio->iommu_set = 1;
+	UPCIE_DEBUG("vfio: container=%d api=%d, group viable, TYPE1 IOMMU set",
+		    vfio->container.fd, api_version);
 
 	err = vfio_map_heap(vfio, heap);
 	if (err) {
 		UPCIE_DEBUG("FAILED: vfio_map_heap(); err(%d)", err);
 		goto fail;
 	}
+	UPCIE_DEBUG("vfio: host heap mapped (nphys=%zu, iova==phys)", heap->nphys);
 
 	vfio->device_fd = vfio_group_get_device_fd(&vfio->group, bdf);
 	if (vfio->device_fd < 0) {
@@ -311,6 +315,7 @@ nvme_controller_open_vfio(struct nvme_controller *ctrlr, struct vfio_ctx *vfio, 
 		UPCIE_DEBUG("FAILED: nvme_vfio_pci_bus_master_enable(); err(%d)", err);
 		goto fail;
 	}
+	UPCIE_DEBUG("vfio: device_fd=%d, bus-master enabled", vfio->device_fd);
 
 	region.index = VFIO_PCI_BAR0_REGION_INDEX;
 	err = vfio_device_get_region_info(vfio->device_fd, &region);
@@ -376,6 +381,8 @@ nvme_controller_open_vfio(struct nvme_controller *ctrlr, struct vfio_ctx *vfio, 
 		UPCIE_DEBUG("FAILED: nvme_mmio_csts_wait_until_ready(); err(%d)", err);
 		goto fail;
 	}
+	UPCIE_DEBUG("vfio: nvme controller open OK (bdf=%s group=%d bar0=%zuB)",
+		    bdf, group_id, (size_t)region.size);
 
 	return 0;
 
