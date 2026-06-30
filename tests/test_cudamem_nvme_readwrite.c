@@ -261,6 +261,7 @@ nvme_init(struct nvme *nvme, const char *bdf, struct rte *rte)
 		printf("FAILED: pci_device_get_driver_name(); err(%d)\n", err);
 		return err;
 	}
+	printf("NVMe DEBUG: bdf=%s driver='%s'\n", bdf, driver_name);
 
 	if (!strcmp(driver_name, "vfio-pci")) {
 		err = nvme_open_with_vfio_cudamem(nvme, bdf, rte);

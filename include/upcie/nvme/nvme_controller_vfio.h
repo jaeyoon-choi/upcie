@@ -179,6 +179,9 @@ vfio_device_get_iommu_group_id(const char *bdf, int *group_id)
 static inline int
 vfio_map_heap(struct vfio_ctx *vfio, struct hostmem_heap *heap)
 {
+	printf("VFIO DEBUG: map host heap pages=%zu hugepgsz=%u\n",
+	       heap->nphys, heap->config->hugepgsz);
+
 	for (size_t i = 0; i < heap->nphys; ++i) {
 		struct vfio_iommu_type1_dma_map map = {0};
 		void *vaddr = (uint8_t *)heap->memory.virt + (i * heap->config->hugepgsz);
@@ -190,8 +193,18 @@ vfio_map_heap(struct vfio_ctx *vfio, struct hostmem_heap *heap)
 		map.size = heap->config->hugepgsz;
 
 		if (vfio_iommu_map_dma(&vfio->container, &map) < 0) {
+			printf("VFIO DEBUG: map heap[%zu] failed vaddr=%p iova=0x%" PRIx64
+			       " size=%" PRIu64 " errno=%d (%s)\n",
+			       i, vaddr, (uint64_t)map.iova, (uint64_t)map.size, errno,
+			       strerror(errno));
 			UPCIE_DEBUG("FAILED: vfio_iommu_map_dma(); errno(%d)", errno);
 			return -errno;
+		}
+
+		if (i < 4 || i + 1 == heap->nphys) {
+			printf("VFIO DEBUG: map heap[%zu] vaddr=%p iova=0x%" PRIx64
+			       " size=%" PRIu64 "\n",
+			       i, vaddr, (uint64_t)map.iova, (uint64_t)map.size);
 		}
 	}
 
@@ -229,51 +242,74 @@ nvme_controller_open_vfio(struct nvme_controller *ctrlr, struct vfio_ctx *vfio, 
 	nvme_qid_bitmap_init(ctrlr->qids);
 
 	// Set up VFIO resources
+	printf("VFIO DEBUG: open bdf=%s\n", bdf);
+
 	err = vfio_device_get_iommu_group_id(bdf, &group_id);
 	if (err) {
+		printf("VFIO DEBUG: vfio_device_get_iommu_group_id(%s) failed err(%d)\n",
+		       bdf, err);
 		UPCIE_DEBUG("FAILED: vfio_device_get_iommu_group_id(); err(%d)", err);
 		goto fail;
 	}
+	printf("VFIO DEBUG: iommu_group=%d\n", group_id);
 
 	err = vfio_container_open(&vfio->container);
 	if (err) {
+		printf("VFIO DEBUG: vfio_container_open() failed err(%d)\n", err);
 		UPCIE_DEBUG("FAILED: vfio_container_open(); err(%d)", err);
 		goto fail;
 	}
+	printf("VFIO DEBUG: container fd=%d\n", vfio->container.fd);
 
 	err = vfio_get_api_version(&vfio->container, &api_version);
 	if (err) {
+		printf("VFIO DEBUG: vfio_get_api_version() failed err(%d)\n", err);
 		UPCIE_DEBUG("FAILED: vfio_get_api_version(); err(%d)", err);
 		goto fail;
 	}
+	printf("VFIO DEBUG: api_version=%d expected=%d\n", api_version, VFIO_API_VERSION);
 	if (api_version != VFIO_API_VERSION) {
 		err = -EINVAL;
+		printf("VFIO DEBUG: unexpected api_version=%d expected=%d\n",
+		       api_version, VFIO_API_VERSION);
 		UPCIE_DEBUG("FAILED: unexpected VFIO_API_VERSION(%d != %d)", api_version,
 			    VFIO_API_VERSION);
 		goto fail;
 	}
 
-	if (!vfio_check_extension(&vfio->container, VFIO_TYPE1_IOMMU)) {
-		err = -ENOTSUP;
-		UPCIE_DEBUG("FAILED: VFIO_TYPE1_IOMMU not supported");
-		goto fail;
+	{
+		int has_type1 = vfio_check_extension(&vfio->container, VFIO_TYPE1_IOMMU);
+		printf("VFIO DEBUG: VFIO_TYPE1_IOMMU extension=%d\n", has_type1);
+		if (!has_type1) {
+			err = -ENOTSUP;
+			printf("VFIO DEBUG: VFIO_TYPE1_IOMMU not supported\n");
+			UPCIE_DEBUG("FAILED: VFIO_TYPE1_IOMMU not supported");
+			goto fail;
+		}
 	}
 
 	err = vfio_group_open(group_id, &vfio->group);
 	if (err) {
+		printf("VFIO DEBUG: vfio_group_open(%d) failed err(%d)\n", group_id, err);
 		UPCIE_DEBUG("FAILED: vfio_group_open(%d); err(%d)", group_id, err);
 		goto fail;
 	}
+	printf("VFIO DEBUG: group fd=%d\n", vfio->group.fd);
 
 	err = vfio_group_get_status(&vfio->group);
 	if (err < 0) {
 		err = -errno;
+		printf("VFIO DEBUG: vfio_group_get_status() failed errno=%d (%s)\n",
+		       errno, strerror(errno));
 		UPCIE_DEBUG("FAILED: vfio_group_get_status(); errno(%d)", errno);
 		goto fail;
 	}
+	printf("VFIO DEBUG: group status flags=0x%x\n", vfio->group.status.flags);
 
 	if (!(vfio->group.status.flags & VFIO_GROUP_FLAGS_VIABLE)) {
 		err = -EBUSY;
+		printf("VFIO DEBUG: group not viable flags=0x%x\n",
+		       vfio->group.status.flags);
 		UPCIE_DEBUG("FAILED: group not viable");
 		goto fail;
 	}
@@ -281,51 +317,73 @@ nvme_controller_open_vfio(struct nvme_controller *ctrlr, struct vfio_ctx *vfio, 
 	err = vfio_group_set_container(&vfio->group, &vfio->container);
 	if (err < 0) {
 		err = -errno;
+		printf("VFIO DEBUG: vfio_group_set_container() failed errno=%d (%s)\n",
+		       errno, strerror(errno));
 		UPCIE_DEBUG("FAILED: vfio_group_set_container(); errno(%d)", errno);
 		goto fail;
 	}
+	printf("VFIO DEBUG: group attached to container\n");
 
 	err = vfio_set_iommu(&vfio->container, VFIO_TYPE1_IOMMU);
 	if (err < 0) {
 		err = -errno;
+		printf("VFIO DEBUG: vfio_set_iommu(TYPE1) failed errno=%d (%s)\n",
+		       errno, strerror(errno));
 		UPCIE_DEBUG("FAILED: vfio_set_iommu(); errno(%d)", errno);
 		goto fail;
 	}
 	vfio->iommu_set = 1;
+	printf("VFIO DEBUG: TYPE1 IOMMU enabled\n");
 
 	err = vfio_map_heap(vfio, heap);
 	if (err) {
+		printf("VFIO DEBUG: vfio_map_heap() failed err(%d)\n", err);
 		UPCIE_DEBUG("FAILED: vfio_map_heap(); err(%d)", err);
 		goto fail;
 	}
+	printf("VFIO DEBUG: host heap mapped into VFIO IOMMU\n");
 
 	vfio->device_fd = vfio_group_get_device_fd(&vfio->group, bdf);
 	if (vfio->device_fd < 0) {
 		err = -errno;
+		printf("VFIO DEBUG: vfio_group_get_device_fd(%s) failed errno=%d (%s)\n",
+		       bdf, errno, strerror(errno));
 		UPCIE_DEBUG("FAILED: vfio_group_get_device_fd(); errno(%d)", errno);
 		goto fail;
 	}
+	printf("VFIO DEBUG: device fd=%d\n", vfio->device_fd);
 
 	err = nvme_vfio_pci_bus_master_enable(vfio->device_fd);
 	if (err) {
+		printf("VFIO DEBUG: nvme_vfio_pci_bus_master_enable() failed err(%d)\n",
+		       err);
 		UPCIE_DEBUG("FAILED: nvme_vfio_pci_bus_master_enable(); err(%d)", err);
 		goto fail;
 	}
+	printf("VFIO DEBUG: PCI bus mastering enabled\n");
 
 	region.index = VFIO_PCI_BAR0_REGION_INDEX;
 	err = vfio_device_get_region_info(vfio->device_fd, &region);
 	if (err < 0) {
 		err = -errno;
+		printf("VFIO DEBUG: vfio_device_get_region_info(BAR0) failed errno=%d (%s)\n",
+		       errno, strerror(errno));
 		UPCIE_DEBUG("FAILED: vfio_device_get_region_info(); errno(%d)", errno);
 		goto fail;
 	}
+	printf("VFIO DEBUG: BAR0 offset=0x%" PRIx64 " size=0x%" PRIx64
+	       " flags=0x%x\n",
+	       (uint64_t)region.offset, (uint64_t)region.size, region.flags);
 
 	bar0 = vfio_map_region(vfio->device_fd, region.size, region.offset);
 	if (bar0 == MAP_FAILED) {
 		err = -errno;
+		printf("VFIO DEBUG: vfio_map_region(BAR0) failed errno=%d (%s)\n",
+		       errno, strerror(errno));
 		UPCIE_DEBUG("FAILED: vfio_map_region(); errno(%d)", errno);
 		goto fail;
 	}
+	printf("VFIO DEBUG: BAR0 mapped at %p\n", bar0);
 
 	vfio->bar0 = bar0;
 	vfio->bar0_size = region.size;
@@ -338,20 +396,27 @@ nvme_controller_open_vfio(struct nvme_controller *ctrlr, struct vfio_ctx *vfio, 
 	cap = nvme_mmio_cap_read(bar0);
 	// CAP.TO is encoded in units of 500 ms.
 	ctrlr->timeout_ms = nvme_reg_cap_get_to(cap) * 500;
+	printf("VFIO DEBUG: NVMe CAP=0x%" PRIx64 " timeout_ms=%d\n",
+	       cap, ctrlr->timeout_ms);
 
 	nvme_mmio_cc_disable(bar0);
 
 	err = nvme_mmio_csts_wait_until_not_ready(bar0, ctrlr->timeout_ms);
 	if (err) {
+		printf("VFIO DEBUG: wait CSTS not ready failed err(%d)\n", err);
 		UPCIE_DEBUG("FAILED: nvme_mmio_csts_wait_until_not_ready(); err(%d)", err);
 		goto fail;
 	}
+	printf("VFIO DEBUG: controller disabled\n");
 
 	err = nvme_qpair_init(&ctrlr->aq, 0, 256, bar0, ctrlr->heap);
 	if (err) {
+		printf("VFIO DEBUG: nvme_qpair_init(aq) failed err(%d)\n", err);
 		UPCIE_DEBUG("FAILED: nvme_qpair_init(aq); err(%d)", err);
 		goto fail;
 	}
+	printf("VFIO DEBUG: admin queue initialized sq=%p cq=%p\n",
+	       ctrlr->aq.sq, ctrlr->aq.cq);
 
 	nvme_mmio_aq_setup(bar0, hostmem_dma_v2p(heap, ctrlr->aq.sq),
 			   hostmem_dma_v2p(heap, ctrlr->aq.cq), ctrlr->aq.depth);
@@ -373,13 +438,17 @@ nvme_controller_open_vfio(struct nvme_controller *ctrlr, struct vfio_ctx *vfio, 
 
 	err = nvme_mmio_csts_wait_until_ready(bar0, ctrlr->timeout_ms);
 	if (err) {
+		printf("VFIO DEBUG: wait CSTS ready failed err(%d)\n", err);
 		UPCIE_DEBUG("FAILED: nvme_mmio_csts_wait_until_ready(); err(%d)", err);
 		goto fail;
 	}
+	printf("VFIO DEBUG: controller enabled\n");
 
 	return 0;
 
 fail:
+	printf("VFIO DEBUG: nvme_controller_open_vfio(%s) returning err(%d)\n",
+	       bdf, err);
 	nvme_controller_close_vfio(ctrlr, vfio);
 
 	return err;
