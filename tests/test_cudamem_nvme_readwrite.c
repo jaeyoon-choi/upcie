@@ -37,10 +37,13 @@ import_cuda_heap_for_nvme(struct nvme *nvme, const char *bdf, struct cudamem_hea
 		return -EINVAL;
 	}
 
+	printf("CUDA IMPORT DEBUG: open %s\n", UPCIE_DMABUF_IMPORTER_DEVICE);
 	nvme->importer_fd = upcie_dmabuf_importer_open();
 	if (nvme->importer_fd < 0) {
+		printf("FAILED: upcie_dmabuf_importer_open(); err(%d)\n", nvme->importer_fd);
 		return nvme->importer_fd;
 	}
+	printf("CUDA IMPORT DEBUG: importer fd=%d\n", nvme->importer_fd);
 
 	nvme->cuda_heap_phys_lut_imported = calloc(heap->nphys, sizeof(*nvme->cuda_heap_phys_lut_imported));
 	if (!nvme->cuda_heap_phys_lut_imported) {
@@ -56,6 +59,9 @@ import_cuda_heap_for_nvme(struct nvme *nvme, const char *bdf, struct cudamem_hea
 		printf("FAILED: upcie_dmabuf_importer_map(); err(%d)\n", err);
 		goto error;
 	}
+	printf("CUDA IMPORT DEBUG: mapped dmabuf fd=%d pages=%zu sg_nents=%u bus_nents=%u\n",
+	       heap->dmabuf.fd, heap->nphys, nvme->cuda_import.sg_nents,
+	       nvme->cuda_import.bus_nents);
 
 	nvme->cuda_heap_phys_lut_orig = heap->phys_lut;
 	heap->phys_lut = nvme->cuda_heap_phys_lut_imported;
