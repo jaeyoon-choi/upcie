@@ -27,21 +27,21 @@ mainline 기능이 아님을 뜻한다.
 
 | 기능 | 발표 당시 상태 |
 |---|---:|
-| `IOMMU_IOAS_MAP_FILE` for memfd | v6.13 |
-| `IOMMU_IOAS_CHANGE_PROCESS` | v6.13 |
-| vIOMMU, vDEVICE, SMMUv3 nesting | v6.13 |
-| ARM ITS management with nested | v6.15 |
-| vEVENTQ | v6.15 |
-| PASID support | v6.15 |
-| `IOMMU_HW_QUEUE_ALLOC` | v6.15 |
-| VFIO DMA-BUF for `IOAS_MAP_FILE` | v6.19 |
-| Consolidated page table | v6.19 |
-| AMD vIOMMU and nested translation | v5 |
-| Kernel live update | RFC |
-| No-IOMMU support | RFC |
-| ARM ITS direct routing | v2 |
-| Confidential compute | N/A |
-| Page-table optimizations and features | N/A |
+| [`IOMMU_IOAS_MAP_FILE` for memfd](https://lore.kernel.org/all/1729861919-234514-8-git-send-email-steven.sistare@oracle.com/) | v6.13 |
+| [`IOMMU_IOAS_CHANGE_PROCESS`](https://lore.kernel.org/all/1731527497-16091-4-git-send-email-steven.sistare@oracle.com/) | v6.13 |
+| [vIOMMU, vDEVICE, SMMUv3 nesting](https://lore.kernel.org/all/cover.1729897352.git.nicolinc@nvidia.com/) | v6.13 |
+| [ARM ITS management with nested](https://lore.kernel.org/all/cover.1740014950.git.nicolinc@nvidia.com/) | v6.15 |
+| [vEVENTQ](https://lore.kernel.org/all/cover.1737754129.git.nicolinc@nvidia.com/) | v6.15 |
+| [PASID support](https://lore.kernel.org/all/20231127063428.127436-1-yi.l.liu@intel.com/) | v6.15 |
+| [`IOMMU_HW_QUEUE_ALLOC`](https://lore.kernel.org/all/cover.1752126748.git.nicolinc@nvidia.com/) | v6.15 |
+| [VFIO DMA-BUF for `IOAS_MAP_FILE`](https://lore.kernel.org/all/8-v2-b2c110338e3f+5c2-iommufd_dmabuf_jgg@nvidia.com/) | v6.19 |
+| [Consolidated page table](https://lore.kernel.org/all/0-v5-116c4948af3d+68091-iommu_pt_jgg@nvidia.com/) | v6.19 |
+| [AMD vIOMMU and nested translation](https://lore.kernel.org/all/20251112182506.7165-1-suravee.suthikulpanit@amd.com/) | v5 |
+| [Kernel live update](https://lore.kernel.org/all/20251202230303.1017519-1-skhawaja@google.com/) | RFC |
+| [No-IOMMU support](https://lore.kernel.org/all/cover.1783360051.git.jacob.pan@linux.microsoft.com/) | RFC |
+| [ARM ITS direct routing](https://lore.kernel.org/all/cover.1736550979.git.nicolinc@nvidia.com/) | v2 |
+| [Confidential compute](https://lore.kernel.org/all/20260427061005.901854-1-aneesh.kumar@kernel.org/) | N/A |
+| [Page-table optimizations and features](https://lore.kernel.org/all/0-v5-116c4948af3d+68091-iommu_pt_jgg@nvidia.com/) | N/A |
 
 이 표는 발표 시점의 스냅샷이다. 특히 AMD와 no-IOMMU 작업은 이후 여러
 revision이 추가됐으므로 현재 상태를 발표자료의 `v5` 또는 `RFC`로만 판단하면
@@ -61,31 +61,31 @@ revision이 추가됐으므로 현재 상태를 발표자료의 `v5` 또는 `RFC
 
 | 우선순위 | 기능 | 대표 author | merge 버전 | 분석 이유 |
 |---|---|---|---:|---|
-| P0 | IOMMUFD 기본 객체와 VFIO cdev | Jason Gunthorpe, Kevin Tian | v6.2 이후 | 이후 모든 기능이 공유하는 IOAS, HWPT, DEVICE와 object ID 모델의 출발점이다. VFIO type1과 달라진 ownership, auto-domain 생성, attach/replace/detach 및 FD close 시 파괴 순서를 이해해야 이후 RFC의 lifetime 문제를 판단할 수 있다. |
-| P1 | Dirty tracking과 user HWPT | Joao Martins, Yi Liu | v6.7 | dirty tracking은 device DMA write를 migration bitmap으로 회수하는 경로이고, user HWPT는 guest가 관리하는 stage-1을 hardware에 연결하는 기반이다. migration 정확성과 kernel-managed stage-2/user-managed stage-1의 책임 경계를 함께 확인해야 한다. |
-| P1 | User HWPT invalidation | Yi Liu, Nicolin Chen | v6.8 | userspace가 stage-1 PTE를 바꾼 뒤 어떤 단위와 순서로 IOTLB invalidation을 요청하는지 정의한다. invalidation 배열의 부분 성공, driver별 data type, completion 및 오류 보고가 guest page-table 일관성을 결정한다. |
-| P1 | I/O page-fault delivery | Lu Baolu, Yi Liu | v6.11 | device fault를 fault FD로 전달하고 userspace 응답을 IOMMU driver로 되돌리는 비동기 경로다. queue overflow, pending response, HWPT 파괴와 fault FD close가 겹칠 때의 수명을 분석해야 한다. |
-| P0 | `IOMMU_IOAS_MAP_FILE` for memfd | Steve Sistare | v6.13 | user VA가 아니라 `fd + offset`을 mapping identity로 사용해 프로세스 주소공간과 backing을 분리한다. 이후 VFIO DMA-BUF와 `guest_memfd` 지원이 이 API를 확장하므로 folio pin, truncate, accounting 및 rollback의 기준 구현이다. |
-| P0 | `IOMMU_IOAS_CHANGE_PROCESS` | Steve Sistare | v6.13 | file-backed IOAS를 다시 만들지 않고 pinned-memory accounting을 새 프로세스로 넘긴다. FD handoff 중 old/new `mm`, `RLIMIT_MEMLOCK`, 실패 시 원자성과 non-file mapping 거부 이유를 확인해야 userspace live update 계약을 이해할 수 있다. |
-| P1 | vIOMMU, vDEVICE, SMMUv3 nesting | Nicolin Chen | v6.13 | physical DEVICE/HWPT와 VM이 보는 IOMMU/device identity를 분리한 현재 virtualization 객체 모델이다. vIOMMU가 parent HWPT를 공유하는 방법과 vDEVICE의 virtual ID/refcount가 AMD vIOMMU, TSM 및 vEVENTQ의 기반이 된다. |
-| P1 | ARM ITS nested management | Nicolin Chen, Robin Murphy | v6.15 | nested translation에서는 guest가 정한 MSI IOVA와 host ITS physical page를 두 stage에 걸쳐 연결해야 한다. reserved MSI region, identity/RMR mapping 및 interrupt remapping 책임이 VMM과 kernel 사이에서 어떻게 나뉘는지 확인해야 한다. |
-| P1 | vEVENTQ | Nicolin Chen | v6.15 | nested-stage fault와 vendor event를 physical ID가 아닌 virtual device ID로 userspace에 전달한다. queue depth, sequence, lost-event 표시와 vDEVICE가 사라질 때의 event lifetime이 correctness 핵심이다. |
-| P1 | PASID support | Kevin Tian, Yi Liu | v6.15 | 하나의 physical device 아래 여러 address space를 `{device, PASID}` 단위로 attach/replace/detach한다. RID 단위 group 모델과 다른 isolation, singleton 조건 및 PASID 재사용 시 ordering을 분석해야 SVA/SIOV 확장을 판단할 수 있다. |
-| P1 | `IOMMU_HW_QUEUE_ALLOC` | Nicolin Chen | v6.15 | guest queue memory를 hardware command queue에 연결해 VM exit 없이 IOMMU 명령을 처리하게 한다. queue memory pinning, `nesting_parent_iova`, mmap 영역, index 충돌과 vIOMMU 파괴 순서를 확인해야 한다. |
-| P0 | VFIO DMA-BUF의 `IOAS_MAP_FILE` | Jason Gunthorpe | v6.19 | VFIO PCI BAR/MMIO를 DMA-BUF로 export해 IOMMUFD IOAS에 넣는 현재 mainline P2P 경로다. 지원 범위가 임의 DMA-BUF가 아니라 single-range VFIO DMA-BUF라는 점, revoke/reset 동기화 및 PCI topology 제약을 분석해야 UPCIE 실험의 보장 범위를 알 수 있다. |
-| P0 | Consolidated page table | Jason Gunthorpe, Alejandro Jimenez | v6.19 | vendor별 page-table walker의 공통 알고리즘을 generic page table로 모아 map/unmap, dirty-bit와 testing을 한곳에서 개선할 수 있게 한다. no-IOMMU software HWPT, live-update 보존 및 향후 batching/cut 최적화가 이 기반을 사용하므로 단순 리팩터로 보면 안 된다. |
+| P0 | [IOMMUFD 기본 객체와 VFIO cdev](https://github.com/torvalds/linux/commit/2ff4bed7fee7) | Jason Gunthorpe, Kevin Tian | v6.2 이후 | 이후 모든 기능이 공유하는 IOAS, HWPT, DEVICE와 object ID 모델의 출발점이다. VFIO type1과 달라진 ownership, auto-domain 생성, attach/replace/detach 및 FD close 시 파괴 순서를 이해해야 이후 RFC의 lifetime 문제를 판단할 수 있다. |
+| P1 | [Dirty tracking과 user HWPT](https://lore.kernel.org/all/20231024135109.73787-1-joao.m.martins@oracle.com/) | Joao Martins, Yi Liu | v6.7 | dirty tracking은 device DMA write를 migration bitmap으로 회수하는 경로이고, user HWPT는 guest가 관리하는 stage-1을 hardware에 연결하는 기반이다. migration 정확성과 kernel-managed stage-2/user-managed stage-1의 책임 경계를 함께 확인해야 한다. |
+| P1 | [User HWPT invalidation](https://lore.kernel.org/all/20230511143844.22693-8-yi.l.liu@intel.com/) | Yi Liu, Nicolin Chen | v6.8 | userspace가 stage-1 PTE를 바꾼 뒤 어떤 단위와 순서로 IOTLB invalidation을 요청하는지 정의한다. invalidation 배열의 부분 성공, driver별 data type, completion 및 오류 보고가 guest page-table 일관성을 결정한다. |
+| P1 | [I/O page-fault delivery](https://lore.kernel.org/all/20240616061155.169343-1-baolu.lu@linux.intel.com/) | Lu Baolu, Yi Liu | v6.11 | device fault를 fault FD로 전달하고 userspace 응답을 IOMMU driver로 되돌리는 비동기 경로다. queue overflow, pending response, HWPT 파괴와 fault FD close가 겹칠 때의 수명을 분석해야 한다. |
+| P0 | [`IOMMU_IOAS_MAP_FILE` for memfd](https://lore.kernel.org/all/1729861919-234514-8-git-send-email-steven.sistare@oracle.com/) | Steve Sistare | v6.13 | user VA가 아니라 `fd + offset`을 mapping identity로 사용해 프로세스 주소공간과 backing을 분리한다. 이후 VFIO DMA-BUF와 `guest_memfd` 지원이 이 API를 확장하므로 folio pin, truncate, accounting 및 rollback의 기준 구현이다. |
+| P0 | [`IOMMU_IOAS_CHANGE_PROCESS`](https://lore.kernel.org/all/1731527497-16091-4-git-send-email-steven.sistare@oracle.com/) | Steve Sistare | v6.13 | file-backed IOAS를 다시 만들지 않고 pinned-memory accounting을 새 프로세스로 넘긴다. FD handoff 중 old/new `mm`, `RLIMIT_MEMLOCK`, 실패 시 원자성과 non-file mapping 거부 이유를 확인해야 userspace live update 계약을 이해할 수 있다. |
+| P1 | [vIOMMU, vDEVICE, SMMUv3 nesting](https://lore.kernel.org/all/cover.1729897352.git.nicolinc@nvidia.com/) | Nicolin Chen | v6.13 | physical DEVICE/HWPT와 VM이 보는 IOMMU/device identity를 분리한 현재 virtualization 객체 모델이다. vIOMMU가 parent HWPT를 공유하는 방법과 vDEVICE의 virtual ID/refcount가 AMD vIOMMU, TSM 및 vEVENTQ의 기반이 된다. |
+| P1 | [ARM ITS nested management](https://lore.kernel.org/all/cover.1740014950.git.nicolinc@nvidia.com/) | Nicolin Chen, Robin Murphy | v6.15 | nested translation에서는 guest가 정한 MSI IOVA와 host ITS physical page를 두 stage에 걸쳐 연결해야 한다. reserved MSI region, identity/RMR mapping 및 interrupt remapping 책임이 VMM과 kernel 사이에서 어떻게 나뉘는지 확인해야 한다. |
+| P1 | [vEVENTQ](https://lore.kernel.org/all/cover.1737754129.git.nicolinc@nvidia.com/) | Nicolin Chen | v6.15 | nested-stage fault와 vendor event를 physical ID가 아닌 virtual device ID로 userspace에 전달한다. queue depth, sequence, lost-event 표시와 vDEVICE가 사라질 때의 event lifetime이 correctness 핵심이다. |
+| P1 | [PASID support](https://lore.kernel.org/all/20231127063428.127436-1-yi.l.liu@intel.com/) | Kevin Tian, Yi Liu | v6.15 | 하나의 physical device 아래 여러 address space를 `{device, PASID}` 단위로 attach/replace/detach한다. RID 단위 group 모델과 다른 isolation, singleton 조건 및 PASID 재사용 시 ordering을 분석해야 SVA/SIOV 확장을 판단할 수 있다. |
+| P1 | [`IOMMU_HW_QUEUE_ALLOC`](https://lore.kernel.org/all/cover.1752126748.git.nicolinc@nvidia.com/) | Nicolin Chen | v6.15 | guest queue memory를 hardware command queue에 연결해 VM exit 없이 IOMMU 명령을 처리하게 한다. queue memory pinning, `nesting_parent_iova`, mmap 영역, index 충돌과 vIOMMU 파괴 순서를 확인해야 한다. |
+| P0 | [VFIO DMA-BUF의 `IOAS_MAP_FILE`](https://lore.kernel.org/all/8-v2-b2c110338e3f+5c2-iommufd_dmabuf_jgg@nvidia.com/) | Jason Gunthorpe | v6.19 | VFIO PCI BAR/MMIO를 DMA-BUF로 export해 IOMMUFD IOAS에 넣는 현재 mainline P2P 경로다. 지원 범위가 임의 DMA-BUF가 아니라 single-range VFIO DMA-BUF라는 점, revoke/reset 동기화 및 PCI topology 제약을 분석해야 UPCIE 실험의 보장 범위를 알 수 있다. |
+| P0 | [Consolidated page table](https://lore.kernel.org/all/0-v5-116c4948af3d+68091-iommu_pt_jgg@nvidia.com/) | Jason Gunthorpe, Alejandro Jimenez | v6.19 | vendor별 page-table walker의 공통 알고리즘을 generic page table로 모아 map/unmap, dirty-bit와 testing을 한곳에서 개선할 수 있게 한다. no-IOMMU software HWPT, live-update 보존 및 향후 batching/cut 최적화가 이 기반을 사용하므로 단순 리팩터로 보면 안 된다. |
 
 ### 3.2 진행 중인 시리즈
 
 | 우선순위 | 시리즈 | 대표 author | 현재 확인 상태 | 분석 이유 |
 |---|---|---|---|---|
-| P0 | DMA-BUF mapping types와 PAL | Jason Gunthorpe | RFC v1, 26 patches | 기존 SGT-only attachment 계약을 mapping-type 협상으로 바꾸고 PAL로 physical/MMIO range를 전달한다. CUDA/GPU exporter 적용 가능성뿐 아니라 raw address 신뢰 경계, revoke와 IOMMUFD publish race를 merge된 VFIO DMA-BUF 경로와 비교해야 한다. |
-| P0 | IOMMUFD no-IOMMU cdev | Jacob Pan, Jason Gunthorpe | v10, 6 patches | hardware IOMMU 없이 IOMMUFD가 page pin과 software IOAS를 제공하고 IOVA-to-PA 조회를 허용한다. UPCIE의 UIO backend, `/proc/pagemap`, `phys_lut`을 upstream API로 대체할 수 있는지와 `CAP_SYS_RAWIO` 보안 경계를 직접 판단할 수 있다. |
-| P1 | `guest_memfd`의 `IOAS_MAP_FILE` 매핑 | Alexey Kardashevskiy | RFC, 1 patch | userspace에 mmap할 수 없는 CoCo private page를 file-backed mapping에 넣는다. KVM이 folio lifetime을 보장한다는 가정, page-state 전환과 shrink 통지 부재를 기존 memfd/PAL 계약과 비교해야 한다. |
-| P1 | AMD nested translation | Suravee Suthikulpanit | v6, 13 patches | AMD DTE에 host stage-2와 guest stage-1을 결합하는 실제 vendor 구현이다. generic HWPT UAPI가 gDTE validation, domain ID, attach/detach 및 invalidation으로 변환되는 과정을 확인할 수 있다. |
-| P1 | AMD hardware vIOMMU | Suravee Suthikulpanit | v3, 22 patches | merge된 vIOMMU/vDEVICE/HW queue 추상화를 AMD guest ID, VF MMIO, private-address 영역과 ID translation table에 연결한다. 공통 IOMMUFD 객체가 vendor state를 충분히 표현하는지 검증할 수 있다. |
-| P2 | TSM ioctl과 TDISP device assignment | Aneesh Kumar K.V, Nicolin Chen, Shameer Kolothum Thodi | v4, 4 patches | vDEVICE를 KVM/TSM과 연결해 device lockdown, bind/unbind 및 guest attestation request를 처리한다. confidential device assignment의 ownership과 destroy ordering을 `guest_memfd` private DMA 흐름과 함께 봐야 한다. |
-| P2 | IOMMU/VFIO live update | Samiullah Khawaja, YiFei Zhu | v2, 16 patches | IOMMUFD FD, HWPT, domain, VFIO cdev와 translation-unit 상태를 커널 live update 너머로 보존한다. generic page-table serialization, restored domain 교체, 실패 rollback 및 versioning을 통해 가장 긴 객체 lifetime을 검토할 수 있다. |
+| P0 | [DMA-BUF mapping types와 PAL](https://lore.kernel.org/all/0-v1-b5cab63049c0+191af-dmabuf_map_type_jgg@nvidia.com/) | Jason Gunthorpe | RFC v1, 26 patches | 기존 SGT-only attachment 계약을 mapping-type 협상으로 바꾸고 PAL로 physical/MMIO range를 전달한다. CUDA/GPU exporter 적용 가능성뿐 아니라 raw address 신뢰 경계, revoke와 IOMMUFD publish race를 merge된 VFIO DMA-BUF 경로와 비교해야 한다. |
+| P0 | [IOMMUFD no-IOMMU cdev](https://lore.kernel.org/all/cover.1783360051.git.jacob.pan@linux.microsoft.com/) | Jacob Pan, Jason Gunthorpe | v10, 6 patches | hardware IOMMU 없이 IOMMUFD가 page pin과 software IOAS를 제공하고 IOVA-to-PA 조회를 허용한다. UPCIE의 UIO backend, `/proc/pagemap`, `phys_lut`을 upstream API로 대체할 수 있는지와 `CAP_SYS_RAWIO` 보안 경계를 직접 판단할 수 있다. |
+| P1 | [`guest_memfd`의 `IOAS_MAP_FILE` 매핑](https://lore.kernel.org/all/20260225075211.3353194-1-aik@amd.com/) | Alexey Kardashevskiy | RFC, 1 patch | userspace에 mmap할 수 없는 CoCo private page를 file-backed mapping에 넣는다. KVM이 folio lifetime을 보장한다는 가정, page-state 전환과 shrink 통지 부재를 기존 memfd/PAL 계약과 비교해야 한다. |
+| P1 | [AMD nested translation](https://lore.kernel.org/all/20260115060814.10692-1-suravee.suthikulpanit@amd.com/) | Suravee Suthikulpanit | v6, 13 patches | AMD DTE에 host stage-2와 guest stage-1을 결합하는 실제 vendor 구현이다. generic HWPT UAPI가 gDTE validation, domain ID, attach/detach 및 invalidation으로 변환되는 과정을 확인할 수 있다. |
+| P1 | [AMD hardware vIOMMU](https://lore.kernel.org/all/20260629153535.15775-1-suravee.suthikulpanit@amd.com/) | Suravee Suthikulpanit | v3, 22 patches | merge된 vIOMMU/vDEVICE/HW queue 추상화를 AMD guest ID, VF MMIO, private-address 영역과 ID translation table에 연결한다. 공통 IOMMUFD 객체가 vendor state를 충분히 표현하는지 검증할 수 있다. |
+| P2 | [TSM ioctl과 TDISP device assignment](https://lore.kernel.org/all/20260427061005.901854-1-aneesh.kumar@kernel.org/) | Aneesh Kumar K.V, Nicolin Chen, Shameer Kolothum Thodi | v4, 4 patches | vDEVICE를 KVM/TSM과 연결해 device lockdown, bind/unbind 및 guest attestation request를 처리한다. confidential device assignment의 ownership과 destroy ordering을 `guest_memfd` private DMA 흐름과 함께 봐야 한다. |
+| P2 | [IOMMU/VFIO live update](https://lore.kernel.org/all/20260427175633.1978233-1-skhawaja@google.com/) | Samiullah Khawaja, YiFei Zhu | v2, 16 patches | IOMMUFD FD, HWPT, domain, VFIO cdev와 translation-unit 상태를 커널 live update 너머로 보존한다. generic page-table serialization, restored domain 교체, 실패 rollback 및 versioning을 통해 가장 긴 객체 lifetime을 검토할 수 있다. |
 
 P0는 UPCIE의 현재 메모리 및 no-IOMMU 설계와 직접 충돌하거나 이를 대체할 수
 있는 작업이다. P1은 IOMMUFD의 메모리 공급자와 vendor 구현을 이해하기 위해
@@ -420,10 +420,18 @@ UPCIE에는 다음 두 축이 가장 중요하다.
 - [Linux v6.13 IOMMUFD 문서](https://www.kernel.org/doc/html/v6.13/userspace-api/iommufd.html)
 - [Linux v6.15 IOMMUFD 문서](https://www.kernel.org/doc/html/v6.15/userspace-api/iommufd.html)
 - [Linux v6.19 IOMMUFD 문서](https://www.kernel.org/doc/html/v6.19/userspace-api/iommufd.html)
+- [IOMMUFD base infrastructure commit](https://github.com/torvalds/linux/commit/2ff4bed7fee7)
 - [IOMMUFD dirty tracking v6](https://lore.kernel.org/all/20231024135109.73787-1-joao.m.martins@oracle.com/)
 - [User HWPT invalidation](https://lore.kernel.org/all/20230511143844.22693-8-yi.l.liu@intel.com/)
+- [I/O page-fault delivery v7](https://lore.kernel.org/all/20240616061155.169343-1-baolu.lu@linux.intel.com/)
+- [`IOMMU_IOAS_MAP_FILE` patch](https://lore.kernel.org/all/1729861919-234514-8-git-send-email-steven.sistare@oracle.com/)
+- [`IOMMU_IOAS_CHANGE_PROCESS` patch](https://lore.kernel.org/all/1731527497-16091-4-git-send-email-steven.sistare@oracle.com/)
+- [vIOMMU infrastructure Part 1 v5](https://lore.kernel.org/all/cover.1729897352.git.nicolinc@nvidia.com/)
+- [ARM ITS nested management](https://lore.kernel.org/all/cover.1740014950.git.nicolinc@nvidia.com/)
 - [vEVENTQ v6](https://lore.kernel.org/all/cover.1737754129.git.nicolinc@nvidia.com/)
 - [PASID attachment series](https://lore.kernel.org/all/20231127063428.127436-1-yi.l.liu@intel.com/)
+- [`IOMMU_HW_QUEUE_ALLOC` v9](https://lore.kernel.org/all/cover.1752126748.git.nicolinc@nvidia.com/)
+- [VFIO DMA-BUF `IOAS_MAP_FILE` patch](https://lore.kernel.org/all/8-v2-b2c110338e3f+5c2-iommufd_dmabuf_jgg@nvidia.com/)
 - [Consolidated page table v5](https://lore.kernel.org/all/0-v5-116c4948af3d+68091-iommu_pt_jgg@nvidia.com/)
 - [DMA-BUF mapping types RFC v1](https://lore.kernel.org/all/0-v1-b5cab63049c0+191af-dmabuf_map_type_jgg@nvidia.com/)
 - [no-IOMMU cdev v10](https://lore.kernel.org/all/cover.1783360051.git.jacob.pan@linux.microsoft.com/)
@@ -433,3 +441,4 @@ UPCIE에는 다음 두 축이 가장 중요하다.
 - [IOMMU live update RFC v2](https://lore.kernel.org/all/20251202230303.1017519-1-skhawaja@google.com/)
 - [IOMMU live update v2](https://lore.kernel.org/all/20260427175633.1978233-1-skhawaja@google.com/)
 - [TSM ioctl v4](https://lore.kernel.org/all/20260427061005.901854-1-aneesh.kumar@kernel.org/)
+- [ARM ITS direct routing RFCv2](https://lore.kernel.org/all/cover.1736550979.git.nicolinc@nvidia.com/)
