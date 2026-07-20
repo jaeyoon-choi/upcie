@@ -280,13 +280,18 @@ DELETE CQ), `nvme_controller_delete_io_qpair_dmamem()`(CID 5/6).
 `prp_offset` 파라미터 추가.
 
 **확인할 것**
-- [DD #40-4, High] `nvme_request.h`의 pool init: base offset을
+- [DD #40-4, High — **재검증으로 강화(2026-07-20)**] `nvme_request.h`의
+  pool init(`nvme_request_pool_init_prps_dmamem`): base offset을
   `dmamem_heap_at_iova()`로 **한 번만** 변환한 뒤
   `reqs[i].prp_addr = prps_iova + i*4096`. LUT heap에서 4 MiB scratch는
   2 MiB hugepage 경계를 반드시 넘고, 경계 뒤 PA 연속성 보장이 없다 →
-  두 번째 hugepage부터 틀린 PRP-list 주소. 각 4 KiB를
-  `dmamem_offset_to_iova()`로 개별 변환하거나 scratch를 ARITHMETIC
-  heap에 강제해야 한다.
+  두 번째 hugepage부터 틀린 PRP-list 주소. **핵심 근거**: 이 함수가
+  "twin"이라 선언한 기존 hostmem 버전(`nvme_request_pool_init_prps`, main)은
+  루프에서 `hostmem_dma_v2p()`를 **페이지마다** 부른다 → 즉 상속이 아니라
+  회귀다. 게다가 같은 PR의 contig PRP builder(40-2)는 hugepage 경계 재변환을
+  올바르게 하므로 PR 내부에서도 불일치. 각 4 KiB를
+  `dmamem_offset_to_iova(heap->dmem, prp_offset + i*4096)`로 개별 변환하면
+  twin과 일치. **코멘트 게시함.**
 - 이 커밋 시점의 VRAM smoke admin heap은 2 MiB → 할당 실패로 런타임
   회귀(위 박스). heap 확장(be72922)과 같은 커밋이었어야 한다.
 - [신규, Low] `calloc(rpool)` 실패 시 `return -errno` — calloc이 errno를
@@ -331,13 +336,18 @@ mapping을 dispatch. `dmamem_heap_at_iova()`가 `dmamem_offset_to_iova()`
 0/NULL로 두고 성공 처리.
 
 **확인할 것**
-- [DD #40-3, High] **best-effort 분기가 실효가 없다**:
-  `hostmem_pagemap_virt_to_phys()`(hostmem.h)는 present bit만 보고
-  PFN 0을 유효값으로 반환한다. 현대 커널은 CAP_SYS_ADMIN 없을 때
-  EPERM 대신 **PFN을 0으로 마스킹**하므로, err==0인 채 0으로 가득 찬
-  LUT가 만들어진다. `hostmem_heap_init`의
-  `memory.phys != phys_lut[0]` 검사도 0==0이라 통과. UIO 경로에서 PA 0
-  근처로 DMA할 수 있다. PFN==0 거부 + capability 선검사가 필요.
+- [DD #40-3, High — **커널 소스로 확정(2026-07-20)**] **best-effort 분기가
+  실효가 없다**: `hostmem_pagemap_virt_to_phys()`(hostmem.h)는 present bit만
+  보고 PFN 0을 유효값으로 반환한다. 커밋 메시지는 "EPERM이면 봐준다"고
+  전제하지만, 커널 4.2+(6.8 포함, `fs/proc/task_mmu.c`의 `pagemap_read`에서
+  `pm.show_pfn = file_ns_capable(..., CAP_SYS_ADMIN)` 확인)는 CAP_SYS_ADMIN이
+  없으면 read를 **성공**시키고 present 비트는 세운 채 **PFN만 0으로 마스킹**
+  한다. EPERM은 4.0/4.1에서만 났다. 따라서 이 함수는 현대 커널에서 EPERM을
+  반환할 수 없고(dead branch), err==0·phys=0으로 0 배열 LUT가 만들어진다.
+  `hostmem_heap_init`의 `memory.phys != phys_lut[0]` 검사도 0==0이라 통과.
+  UIO 경로에서 PA 0 근처로 DMA할 수 있다. 수정: 함수에서 present && PFN==0을
+  `-EPERM`으로 반환 → 40-3이 추가한 `err != -EPERM` 분기가 비로소 작동.
+  **코멘트 게시 대상.**
 - [신규, Med — 설계 목표 미달] 커밋 메시지는 "arithmetic 소비자는 root
   요구를 벗는다"고 하지만 `hostmem_heap_init()`은 여전히
   `phys_lut == NULL`이면 `-EPERM`으로 실패한다. best-effort 혜택은
@@ -384,11 +394,21 @@ cudamem/hipmem_heap의 phys_lut를 borrow하는 얇은 wrapper. `cpu_va=NULL`.
 `dmamem_lut_pagesize_shift()`로 helper 통합.
 
 **확인할 것**
-- [DD #40-2, High] **기본 설정으로 항상 실패**:
-  `cudamem_config_init()`은 `device_pagesize = 65536`(cudamem_config.h:118)
-  인데 `dmamem_lut_pagesize_shift()`는 4K/2M/1G만 허용 →
-  `dmamem_from_cuda_lut()`가 기본 heap에 `-EINVAL`. HIP은 4 KiB라 통과.
-  64 KiB를 허용 목록에 넣거나 generic power-of-two + ctz로 바꿔야 한다.
+- [DD #40-2, Med] **이 커밋이 추가한 화이트리스트가 기본 CUDA heap을 막음**:
+  `dmamem_lut_pagesize_shift()`(이 커밋 신규)는 4K/2M/1G만 허용하는데,
+  기존 `cudamem_config_init()`의 `device_pagesize`는 65536(cudamem_config.h:118)
+  이라 `dmamem_from_cuda_lut()`가 기본 heap에 항상 `-EINVAL`. HIP은 4 KiB라 통과.
+  LUT fastpath는 pagesize가 2의 거듭제곱이기만 하면 되므로, 화이트리스트
+  대신 generic power-of-two 검사(`__builtin_ctzll`)로 바꾸면 이 커밋 안에서
+  해소된다.
+  - **주의(2026-07-20 실측 정정)**: 65536이 "NVIDIA GPU/dma-buf 페이지 크기"
+    라는 초기 서술은 틀렸다. RTX PRO 4000(Blackwell)에서
+    `cuMemGetAllocationGranularity`는 MINIMUM과 dma-buf-fd export handle 모두
+    **2 MiB**를 반환한다(64 KiB 아님). 즉 65536 기본값 자체가 실측과 불일치
+    하지만, 그 값은 `main`의 커밋 `aff1aaf`("use 4KB host page granularity for
+    NVMe PRP alignment")에서 온 **기존 코드**이므로 이 PR 소관이 아니다. 40-6에
+    대한 정당한 지적은 화이트리스트뿐이고, 65536이 옳은지는 별도(기존 코드)
+    문제로 분리한다.
 - [DD #40-9, Med] `cpu_va=NULL`이므로 40-2의 generic PRP builder
   (`dmamem_va_to_iova` 기반)에 GPU buffer를 넣을 수 없다(assert).
   offset 기반 builder가 없어서 end-to-end NVMe 경로가 API로 완결되지
@@ -405,11 +425,13 @@ pci_bar_map으로 BAR0, 나머지는 공통 helper 합류),
 device fd). IO qpair/admin helper는 vfio 변형을 그대로 재사용.
 
 **확인할 것**
-- [DD #40-1, High] **UIO 경로에 Bus Master Enable이 없다**:
-  `nvme_controller_open_dmamem_uio()`는 BAR mmap만 한다.
-  `uio_pci_generic`도 probe에서 `pci_set_master()`를 하지 않는다.
-  외부에서 BME가 켜져 있지 않으면 admin 명령이 전부 timeout.
-  VFIO 형제들은 공통 helper에서 명시적으로 켠다 — 비대칭.
+- [DD #40-1 — **드롭(2026-07-20 재검증)**] "UIO 경로에 BME가 없다"는 지적은
+  철회한다. upcie는 BME를 C 코드가 아니라 `build-review/scripts/devbind`에서
+  켠다: `if driver_name == "uio_pci_generic": setpci -s <bdf> COMMAND=0x06`
+  (vfio-pci일 때는 안 켬 — vfio가 open 시 리셋하므로 C 코드가 켜야 함).
+  즉 UIO controller가 C에서 BME를 안 켜는 건 기존 sysfs backend와 동일한
+  **의도된 역할 분담**이지 누락이 아니다. deep dive가 커널
+  `uio_pci_generic`까지 확인하고도 upcie 자체 도구를 못 본 사례.
 - [DD #40-7, High] translator/domain 일치 검증 부재: UIO 주석은 "LUT
   heap이어야 한다"고 하지만 `heap->dmem->translator`를 검사하지 않고,
   type1/iommufd controller도 heap의 mapping이 자기 container/IOAS에
