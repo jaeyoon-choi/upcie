@@ -1,5 +1,50 @@
 # upcie PR #37~#40 쉽게 읽는 분석
 
+> **재검증 노트 (2026-07-20)**
+>
+> 아래 본문은 최초 정적 분석이다. 이후 커밋별 리뷰 세션에서 각 지적을
+> 코드·하드웨어·커널 소스로 다시 검증했고, 상당수의 등급이 바뀌었다.
+> 최종 판정은 [커밋별 워크스루](./iommufd_prs_commit_walkthrough.md)가
+> 기준이며, 본문의 개별 "High"를 그대로 신뢰하지 말고 아래 요약을 먼저
+> 볼 것.
+>
+> **판정이 바뀐 것 (본문 등급 → 재검증 후)**
+> - #37 allocator overflow (본문 §37 1번, High): **nit으로 강등** — 정상
+>   입력에선 안 밟히고 호출자 산술 실수에서만 발생. in-tree 트리거 없음.
+> - #38 queue delete 실패 후 재사용 / CID 미대조 (본문 §38 1·3번, High):
+>   **드롭 또는 별도 패치** — CID 미대조는 기존 `submit_sync`부터 있는
+>   코드베이스 전역 패턴이라 이 PR 코멘트 대상 아님(별도 helper 패치감).
+>   quarantine은 전체 셧다운하는 현 소비자에선 무해.
+> - #39 3개 Medium (AUTO fallback, 환경변수 파괴, 초기화 비대칭): **전부
+>   실체 없음** — 미머지 example 스택 내부의 리네임/기본값이라 외부 영향 0.
+> - #40-1 UIO BME 부재 (본문 §40 1번, High): **드롭** — BME는 C 코드가
+>   아니라 `build-review/scripts/devbind`가 `setpci COMMAND=0x06`으로 켠다.
+> - #40-2 CUDA 근거 (본문 §40 2번): 결함(기본 heap이 화이트리스트에서
+>   -EINVAL)은 유효하나, "64 KiB가 GPU 페이지"라는 서술은 **틀림**. Blackwell
+>   실측 VMM granularity는 2 MiB. `device_pagesize=65536`은 기존 코드(main)
+>   소관이고, 이 PR 지적은 화이트리스트 → generic power-of-two로 한정.
+>
+> **코드/하드웨어/커널로 확정되어 코멘트 게시한 것**
+> - #37: iommufd.h의 CUDA dma-buf 예시가 현재 mainline에서 되는지 확인 질문;
+>   `hugepgsz=0` SIGFPE nit.
+> - #38: 중간 커밋(ecf3163/9b105d0) 빌드 깨짐 → bisect; WRITE(VRAM→disk)
+>   방향 미검증; non-vfio-pci exporter 로드맵(PAL) 질문.
+> - #40-3 zero-LUT (커널 6.8 `pagemap_read` 소스로 확정): CAP_SYS_ADMIN 없으면
+>   PFN이 0으로 마스킹되고 EPERM이 안 나서, 0 배열 LUT가 성공 처리됨 → UIO에서
+>   PA 0 DMA. 함수가 present && PFN==0을 -EPERM으로 반환하도록.
+> - #40-1/40-4 PRP scratch: `nvme_request_pool_init_prps_dmamem`이 선형 stride
+>   하는데 hostmem twin은 페이지별 변환 → LUT에서 hugepage 경계 뒤 틀린 주소.
+> - #40-6 CUDA whitelist: 기본 config가 constructor 입구에서 -EINVAL.
+> - #40-7 domain 검증 부재: 잘못된 translator/container heap이 조용히 ASQ/ACQ에
+>   기록됨 → open에서 -EXDEV 거부 필요.
+>
+> **방법론적 교훈**: 최초 분석이 "미머지 example 스택"을 "머지된 제품
+> 라이브러리" 기준으로 채점해 High가 과다했다. 재검증에서 살아남은 것은
+> (a) 정상 입력·정상 설정으로 트리거되고, (b) 이 PR이 새로 만든 코드이며,
+> (c) 조용한 오동작으로 이어지는 것들이다.
+
+---
+
 이 네 PR의 목적은 **NVMe가 host memory와 GPU memory를 같은 방식으로
 DMA하도록 주소 변환과 DMA mapping 정리 규칙을 `dmamem` API 뒤에 모으는
 것**이다. 실제 backing의 소유권과 수명은 owned constructor와 borrowed
