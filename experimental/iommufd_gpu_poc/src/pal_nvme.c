@@ -15,7 +15,7 @@
  *       write), which completes OK and leaves only the DMAR fault.
  *
  * Extra modes for the follow-up runs:
- *   --map-pa BDF   map the GPU with the team's iommu_map_pa module instead of
+ *   --map-pa BDF   map the GPU with upcie's iommu_map_pa module instead of
  *                  IOMMU_IOAS_MAP_FILE (2 MiB pages at IOVA 256 GiB, as xNVMe
  *                  does), so both paths run through the same driver code
  *   --bench rd|wr  sequential reads into (rd) or writes from (wr) the target
@@ -284,7 +284,7 @@ static int map_host(struct ctx *c)
 	return 0;
 }
 
-/* BAR1 physical address of the start of the CUDA buffer, through the team's
+/* BAR1 physical address of the start of the CUDA buffer, through upcie's
  * dmabuf_import misc importer (no IOMMU domain, so dma_addr == phys). */
 static int gpu_phys_addr(struct ctx *c)
 {
@@ -353,8 +353,9 @@ not_paged:
 	return contig >= c->gpu_size ? 0 : -1;
 }
 
-/* The team's current path: iommu_map() of the BAR1 pages into the domain the
- * vfio device is attached to, behind iommufd's back at a fixed IOVA. */
+/* The iommu_map_pa path that xNVMe uses: iommu_map() of the BAR1 pages into
+ * the domain the vfio device is attached to, behind iommufd's back at a fixed
+ * IOVA. */
 static int map_gpu_pa(struct ctx *c)
 {
 	if (gpu_phys_addr(c))
