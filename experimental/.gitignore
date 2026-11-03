@@ -20,6 +20,9 @@ dmabuf_import/dmabuf_import_*
 dmabuf_import/test/dmabuf_import_*
 !dmabuf_import/test/dmabuf_import_*.c
 
+# Binaries built by iommufd_gpu_poc/Makefile
+iommufd_gpu_poc/build/
+
 # Debian packaging build output
 debian/.debhelper/
 debian/files
