@@ -9,6 +9,10 @@
 
 obj-m += dmabuf_import.o
 
+# The DMA-buf mapping types series renames the importer entry points. Detect
+# it by one of the new names, since mainline has <linux/dma-buf-mapping.h> too.
+ccflags-y += $(if $(shell grep -s dma_buf_sgt_dynamic_attach $(srctree)/include/linux/dma-buf.h),-DDMABUF_IMPORT_MAPPING_TYPES)
+
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD  := $(shell pwd)
 

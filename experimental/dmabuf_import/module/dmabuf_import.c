@@ -19,6 +19,21 @@
 #include <linux/mutex.h>
 #include <linux/scatterlist.h>
 #include <linux/dma-buf.h>
+/*
+ * DMABUF_IMPORT_MAPPING_TYPES comes from the Makefile on a kernel with the
+ * DMA-buf mapping types series: importer calls are dma_buf_sgt_*(), the
+ * attachment has no dev member, and the callback is invalidate_mappings.
+ */
+#ifdef DMABUF_IMPORT_MAPPING_TYPES
+#include <linux/dma-buf-mapping.h>
+#define dmabuf_import_dynamic_attach	dma_buf_sgt_dynamic_attach
+#define dmabuf_import_map_attachment	dma_buf_sgt_map_attachment
+#define dmabuf_import_unmap_attachment	dma_buf_sgt_unmap_attachment
+#else
+#define dmabuf_import_dynamic_attach	dma_buf_dynamic_attach
+#define dmabuf_import_map_attachment	dma_buf_map_attachment
+#define dmabuf_import_unmap_attachment	dma_buf_unmap_attachment
+#endif
 #include <linux/dma-mapping.h>
 #include <linux/dma-resv.h>
 #include <linux/pci.h>
@@ -140,7 +155,11 @@ static void dmabuf_import_move_notify(struct dma_buf_attachment *attach)
 	if (!desc || !desc->sgt || desc->dying)
 		return;
 
+#ifdef DMABUF_IMPORT_MAPPING_TYPES
+	pr_warn_once("dmabuf_import: exporter moved a pinned import; addresses are stale\n");
+#else
 	dev_warn_once(attach->dev, "exporter moved a pinned import; addresses are stale\n");
+#endif
 }
 
 /*
@@ -152,7 +171,7 @@ static void dmabuf_import_move_notify(struct dma_buf_attachment *attach)
 static const struct dma_buf_attach_ops dmabuf_import_attach_ops = {
 	.allow_peer2peer	= true,
 	/* Linux 7.1 renamed the callback; it is called as before */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+#if defined(DMABUF_IMPORT_MAPPING_TYPES) || LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
 	.invalidate_mappings	= dmabuf_import_move_notify,
 #else
 	.move_notify		= dmabuf_import_move_notify,
@@ -329,7 +348,7 @@ static void dmabuf_import_desc_destroy(struct dmabuf_import_desc *desc)
 	if (desc->sgt || desc->pinned) {
 		dma_resv_lock(desc->dma_buf->resv, NULL);
 		if (desc->sgt)
-			dma_buf_unmap_attachment(desc->attach, desc->sgt, desc->dir);
+			dmabuf_import_unmap_attachment(desc->attach, desc->sgt, desc->dir);
 		if (desc->pinned)
 			dma_buf_unpin(desc->attach);
 		dma_resv_unlock(desc->dma_buf->resv);
@@ -446,7 +465,7 @@ static int dmabuf_import_attach_locked(struct file *filp, bool owned,
 	snprintf(tmp->importer, sizeof(tmp->importer), "%s",
 		 tmp->pdev ? pci_name(tmp->pdev) : "misc");
 
-	tmp->attach = dma_buf_dynamic_attach(tmp->dma_buf, dev, &dmabuf_import_attach_ops, tmp);
+	tmp->attach = dmabuf_import_dynamic_attach(tmp->dma_buf, dev, &dmabuf_import_attach_ops, tmp);
 	if (IS_ERR(tmp->attach)) {
 		ret = PTR_ERR(tmp->attach);
 		tmp->attach = NULL;
@@ -460,7 +479,7 @@ static int dmabuf_import_attach_locked(struct file *filp, bool owned,
 	if (!ret) {
 		tmp->pinned = true;
 
-		tmp->sgt = dma_buf_map_attachment(tmp->attach, dir);
+		tmp->sgt = dmabuf_import_map_attachment(tmp->attach, dir);
 		if (IS_ERR(tmp->sgt)) {
 			ret = PTR_ERR(tmp->sgt);
 			tmp->sgt = NULL;
